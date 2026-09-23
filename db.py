@@ -6,7 +6,8 @@ from werkzeug.security import generate_password_hash
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DATABASE_PATH = os.environ.get("LETTER_DATABASE", str(BASE_DIR / "letters.sqlite3"))
+DEFAULT_DATABASE_PATH = "/tmp/letters.sqlite3" if os.environ.get("VERCEL") else str(BASE_DIR / "letters.sqlite3")
+DATABASE_PATH = os.environ.get("LETTER_DATABASE", DEFAULT_DATABASE_PATH)
 
 
 def connect() -> sqlite3.Connection:

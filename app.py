@@ -38,6 +38,11 @@ def create_app(test_config=None):
     def handle_http_error(error):
         return jsonify(error=error.description), error.code
 
+    @app.errorhandler(Exception)
+    def handle_unexpected_error(error):
+        app.logger.exception("Unhandled application error")
+        return jsonify(error="The application could not complete the request"), 500
+
     def current_user():
         user_id = session.get("user_id")
         if not user_id:

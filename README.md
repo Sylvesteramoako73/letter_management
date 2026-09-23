@@ -48,3 +48,20 @@ PostgreSQL connection string and `AUTH_MODE=entra` when the intranet identity
 provider is ready; local mode remains available for development. The current
 SQLite adapter is intentionally retained as the tested development path while
 the PostgreSQL repository migration is staged separately.
+
+## Vercel deployment
+
+Vercel uses [api/index.py](./api/index.py) as the WSGI entrypoint. Configure
+these Vercel environment variables before deploying:
+
+```text
+SECRET_KEY=<long-random-value>
+SEED_DEMO_DATA=1
+VERCEL=1
+```
+
+`SEED_DEMO_DATA=1` creates the local demonstration accounts and must not be
+used for production. Vercel's `/tmp` SQLite fallback is ephemeral and is only
+for demos; production must provide a persistent PostgreSQL or network database
+and set `LETTER_DATABASE` or complete the PostgreSQL adapter before relying on
+stored letters.
