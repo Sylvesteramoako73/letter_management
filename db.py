@@ -18,7 +18,10 @@ def connect() -> sqlite3.Connection:
 
 
 def initialize(connection: sqlite3.Connection) -> None:
-    schema = (BASE_DIR / "schema.sql").read_text(encoding="utf-8")
+    schema_path = BASE_DIR / "schema.sql"
+    if not schema_path.exists():
+        schema_path = Path("/var/task/schema.sql")
+    schema = schema_path.read_text(encoding="utf-8")
     connection.executescript(schema)
     columns = {
         row["name"]
@@ -43,6 +46,12 @@ def initialize(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_letters_due_status ON letters(due_date, status)"
     )
     connection.commit()
+
+
+def ensure_database() -> None:
+    with connect() as connection:
+        initialize(connection)
+        seed_demo_data(connection)
 
 
 def seed_demo_data(connection: sqlite3.Connection) -> None:

@@ -65,3 +65,7 @@ used for production. Vercel's `/tmp` SQLite fallback is ephemeral and is only
 for demos; production must provide a persistent PostgreSQL or network database
 and set `LETTER_DATABASE` or complete the PostgreSQL adapter before relying on
 stored letters.
+
+The application initializes and verifies the SQLite schema on every cold start.
+After changing deployment configuration, create a new Vercel deployment rather
+than relying on a previous function instance.

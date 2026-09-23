@@ -6,7 +6,7 @@ from flask import Flask, jsonify, render_template, request, session, send_file
 from werkzeug.exceptions import HTTPException, Unauthorized
 from werkzeug.security import check_password_hash
 
-from db import connect, initialize, seed_demo_data
+from db import connect, ensure_database, initialize, seed_demo_data
 from workflow import (
     approve,
     assign_letter,
@@ -30,9 +30,7 @@ def create_app(test_config=None):
     if test_config:
         app.config.update(test_config)
 
-    with connect() as connection:
-        initialize(connection)
-        seed_demo_data(connection)
+    ensure_database()
 
     @app.errorhandler(HTTPException)
     def handle_http_error(error):
@@ -90,6 +88,15 @@ def create_app(test_config=None):
     def health():
         with connect() as connection:
             connection.execute("SELECT 1").fetchone()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+        required = {"users", "departments", "letters", "audit_events"}
+        if not required.issubset(tables):
+            return jsonify(status="error", database="schema_not_ready"), 503
         return jsonify(status="ok", database="ok")
 
     @app.post("/login")
