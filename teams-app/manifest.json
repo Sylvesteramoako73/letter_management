@@ -1,0 +1,37 @@
+{
+  "$schema": "https://developer.microsoft.com/json/schemas/teams/v1.16/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.16",
+  "version": "1.0.0",
+  "id": "5f8c7b6e-9a44-4d5a-8a3e-2a4a7d4a0b11",
+  "packageName": "com.swamiindia.siglletterdesk",
+  "developer": {
+    "name": "Swami India Ghana Limited",
+    "websiteUrl": "https://swamiindiaghanaltd.com",
+    "privacyUrl": "https://swamiindiaghanaltd.com",
+    "termsOfUseUrl": "https://swamiindiaghanaltd.com"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "SIGL Letter Desk",
+    "full": "Swami India Ghana Limited Letter Desk"
+  },
+  "description": {
+    "short": "Secure correspondence workflow",
+    "full": "Receive, route, respond to, review, and finalize company correspondence."
+  },
+  "accentColor": "#741D2B",
+  "staticTabs": [
+    {
+      "entityId": "sigl-letter-desk",
+      "name": "Letter Desk",
+      "scopes": ["personal"],
+      "contentUrl": "https://YOUR-HTTPS-HOSTNAME.example.com/",
+      "websiteUrl": "https://YOUR-HTTPS-HOSTNAME.example.com/"
+    }
+  ],
+  "permissions": ["identity"],
+  "validDomains": ["YOUR-HTTPS-HOSTNAME.example.com"]
+}

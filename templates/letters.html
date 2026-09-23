@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SIGL Letter Desk</title>
+  <link rel="stylesheet" href="/static/letters.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section id="login-card" class="login-screen">
+      <div class="login-brand-panel">
+        <div class="brand-lockup"><span class="brand-mark">S</span><span>SIGL</span></div>
+        <div class="login-brand-copy">
+          <p class="eyebrow light">Swami India Ghana Limited</p>
+          <h1>Every letter.<br><em>Handled with purpose.</em></h1>
+          <p>A secure command centre for receiving, routing and closing correspondence across the business.</p>
+        </div>
+        <div class="brand-footer"><span class="pulse"></span> Internal operations platform <span>·</span> v1.0</div>
+      </div>
+      <div class="login-form-panel">
+        <div class="mobile-brand"><span class="brand-mark">S</span><strong>SIGL</strong></div>
+        <div class="form-heading"><p class="eyebrow">Welcome back</p><h2>Sign in to Letter Desk</h2><p>Use your company credentials to continue.</p></div>
+        <form id="login-form">
+          <label>Username<span class="field-wrap"><span class="field-icon">◉</span><input name="username" autocomplete="username" placeholder="Enter your username" required></span></label>
+          <label>Password<span class="field-wrap"><span class="field-icon">●</span><input name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required></span></label>
+          <button id="login-button" class="primary-button full-button">Sign in securely <span>→</span></button>
+          <p id="login-message" class="message" role="alert"></p>
+        </form>
+        <p class="login-note"><span class="lock">⌑</span> Protected internal access</p>
+      </div>
+    </section>
+
+    <section id="workspace" class="workspace hidden">
+      <aside class="sidebar">
+        <div class="brand-lockup sidebar-brand"><span class="brand-mark">S</span><span>SIGL <small>LETTER DESK</small></span></div>
+        <nav><a class="nav-item active" href="#overview"><span>▦</span> Overview</a><a class="nav-item" href="#letters"><span>▤</span> All letters</a><a class="nav-item" href="#intake-card"><span>＋</span> New intake</a></nav>
+        <div class="sidebar-bottom"><div class="status-chip"><span class="pulse"></span> System operational</div><button id="logout" class="signout"><span>↪</span> Sign out</button></div>
+      </aside>
+      <div class="main-content">
+        <header class="workspace-header"><div><p class="eyebrow">Operations / Correspondence</p><h1>Good day, <span id="identity-name">team</span>.</h1><p class="header-subtitle">Keep every response moving forward.</p></div><div class="profile"><div class="avatar" id="avatar">U</div><div><strong id="identity"></strong><small id="identity-role"></small></div><span class="profile-caret">⌄</span></div></header>
+        <div id="message" class="message" role="status" aria-live="polite"></div>
+        <section id="role-panel" class="role-panel"></section>
+        <section id="overview" class="metrics">
+          <div class="metric-card"><div class="metric-icon burgundy">▤</div><div><span>Total letters</span><strong id="total-count">0</strong></div><small>In your scope</small></div>
+          <div class="metric-card"><div class="metric-icon amber">◷</div><div><span>Awaiting action</span><strong id="pending-count">0</strong></div><small>Needs attention</small></div>
+          <div class="metric-card"><div class="metric-icon green">✓</div><div><span>Finalized</span><strong id="finalized-count">0</strong></div><small>Closed securely</small></div>
+        </section>
+        <div id="intake-card" class="card intake-card hidden"><div class="section-heading"><div><p class="eyebrow">Front desk</p><h2>Register a new letter</h2><p>Capture the source document and route it to the right department.</p></div><span class="step-badge">01 / INTAKE</span></div>
+          <form id="intake-form" class="grid"><label>Sender<input name="sender" placeholder="Agency or organisation name" required></label><label>Subject<input name="subject" placeholder="Letter subject" required></label><label>Received date<input name="received_date" type="date" required></label><label>Department<select name="department_id" id="department" required><option value="">Select department</option></select></label><label class="wide upload-box"><span class="upload-icon">↑</span><span><strong>Upload scanned document</strong><small>PDF, PNG, JPG, TIF up to 25 MB</small></span><input name="document" type="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff" required></label><button class="wide primary-button">Create intake record <span>→</span></button></form>
+        </section>
+        <section class="letters-section"><div class="section-heading compact"><div><p class="eyebrow">Work queue</p><h2>Recent correspondence</h2><p class="section-caption">Every intake record appears here with its current workflow status.</p></div><button id="refresh" class="secondary-button">↻ <span>Refresh</span></button></div><div class="queue-filters"><input id="search" placeholder="Search reference, sender or subject"><select id="status-filter"><option value="">All statuses</option><option value="intake">Intake</option><option value="assigned">Assigned</option><option value="in_progress">In progress</option><option value="submitted_for_review">Submitted for review</option><option value="md_review">MD review</option><option value="finalized">Finalized</option></select><select id="priority-filter"><option value="">All priorities</option><option value="urgent">Urgent</option><option value="high">High</option><option value="normal">Normal</option><option value="low">Low</option></select></div><div id="letters" class="cards"></div></section>
+      </div>
+    </section>
+  </main>
+  <script src="/static/letters.js"></script>
+</body>
+</html>
