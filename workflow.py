@@ -205,7 +205,16 @@ def get_editable_document(actor, letter_id: int):
         letter = _get_letter(connection, letter_id)
         require_view(actor, letter)
         if not letter["editable_document"]:
-            raise NotFound("No editable document is available")
+            # Letters received before Word conversion existed get their copy on first request.
+            editable_document = to_editable_docx(letter["source_file"], letter["source_document"])
+            editable_filename = f"{Path(letter['source_file']).stem}.docx"
+            connection.execute(
+                "UPDATE letters SET editable_document = ?, editable_filename = ? WHERE id = ?",
+                (editable_document, editable_filename, letter_id),
+            )
+            _version(connection, letter_id, actor["id"], "editable", editable_document, editable_filename, "Generated editable document")
+            connection.commit()
+            letter = _get_letter(connection, letter_id)
         return letter
     finally:
         connection.close()
