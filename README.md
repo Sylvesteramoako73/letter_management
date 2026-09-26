@@ -81,7 +81,7 @@ these Vercel environment variables before deploying:
 
 ```text
 SECRET_KEY=<long-random-value>
-DATABASE_URL=<PostgreSQL connection string, e.g. from the Neon integration>
+POSTGRES_URL=<PostgreSQL connection string, set by the Supabase or Neon integration>
 SEED_DEMO_DATA=1
 ```
 

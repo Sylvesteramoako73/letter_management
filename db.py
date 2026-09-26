@@ -2,6 +2,7 @@ import os
 import re
 import sqlite3
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from werkzeug.security import generate_password_hash
 
@@ -32,7 +33,13 @@ _SCHEMA_LOCK_ID = 7_300_451
 
 def database_url() -> str:
     """PostgreSQL connection string, read per call so tests and scripts can override it."""
-    return (os.environ.get("POSTGRES_URL") or os.environ.get("DATABASE_URL") or "").strip()
+    url = (os.environ.get("POSTGRES_URL") or os.environ.get("DATABASE_URL") or "").strip()
+    if not url:
+        return url
+    # Supabase's Vercel integration appends "supa=...", which libpq rejects.
+    parts = urlsplit(url)
+    query = [(key, value) for key, value in parse_qsl(parts.query) if key != "supa"]
+    return urlunsplit(parts._replace(query=urlencode(query)))
 
 
 def using_postgres() -> bool:
