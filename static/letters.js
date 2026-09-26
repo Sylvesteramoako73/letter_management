@@ -257,6 +257,7 @@ function roleConfig(role) {
       queues: [
         { title: 'Awaiting your approval', sub: 'Open a letter to read the response, then approve or return it.', filter: (l) => l.status === 'md_review', empty: ['Nothing awaiting approval', 'Letters routed to you by the PA will appear here.'] },
         { title: 'Overdue across the company', sub: 'Open letters past their due date.', filter: isOverdue, limit: 6, hideWhenEmpty: true },
+        { title: 'All other open letters', sub: 'Still with departments. Open one to approve it directly if it can’t wait.', filter: (l) => isOpen(l) && l.status !== 'md_review', limit: 8, hideWhenEmpty: true },
       ],
     },
   };
@@ -449,6 +450,7 @@ function describeEvent(event, letter) {
     routed_to_md: ['arrow', 'wine', `Sent to the MD by ${who}`],
     changes_requested: ['returned', 'red', `Changes requested by ${who}`],
     approved_and_finalized: ['lock', 'green', `Approved and locked by ${who}`],
+    md_override: ['alert', 'wine', `MD override by ${who}: skipped from “${esc(STATUS[details.skipped_from] || details.skipped_from || 'an earlier stage')}”`],
   };
   const [iconName, tone, text] = map[event.action] || ['clock', '', `${esc(event.action.replaceAll('_', ' '))} by ${who}`];
   return { iconName, tone, text, quote: details.details || '' };
@@ -502,6 +504,12 @@ async function actionPanel(letter, audit) {
   }
   if (role === 'md' && s === 'md_review') {
     return card('Your decision', 'Approving produces the final PDF and locks the letter.', `${responseBox}<div class="btn-row"><button class="btn btn-success" data-act="approve">${icon('lock')}Approve &amp; lock</button><button class="btn btn-danger-outline" data-act="changes">${icon('returned')}Request changes</button></div>`);
+  }
+  if (role === 'md' && s !== 'finalized') {
+    const stage = STATUS[s] || s;
+    return card('Approve directly', `This letter is at “${stage}”. You can approve it now without waiting for the remaining steps. The override is recorded in its history.`, `${feedback}
+      <label><span>Response to send${letter.response_text ? '' : ' <span class="hint">(no one has drafted one yet)</span>'}</span><textarea id="a-md-response" class="response-editor" placeholder="Write or edit the response that will go on the final letter…">${esc(letter.response_text || '')}</textarea></label>
+      <div class="btn-row"><button class="btn btn-success" data-act="md-approve">${icon('lock')}Approve &amp; lock now</button></div>`, 'MD override');
   }
   if (s === 'finalized') return card('Finalised', `Approved on ${fmtDate(letter.finalized_at)}.`, `${responseBox}<div class="btn-row"><a class="btn btn-success" href="/letters/${letter.id}/pdf" style="text-decoration:none">${icon('download')}Download final PDF</a></div>`, 'Complete');
   const waiting = {
@@ -616,6 +624,13 @@ function bindActions(letter) {
     if (act === 'approve') {
       const ok = await modal({ title: 'Approve and lock this letter?', body: 'This produces the final PDF on SIGL letterhead and locks the letter. It cannot be edited afterwards.', confirmText: 'Approve & lock', confirmClass: 'btn-success' });
       if (ok) return run(button, 'POST', `/letters/${letter.id}/approve`, {}, 'Approved. The final PDF is ready.');
+    }
+    if (act === 'md-approve') {
+      const text = $('#a-md-response').value.trim();
+      if (!text) { toast('Write the response that will go on the final letter first.', 'error'); $('#a-md-response').focus(); return; }
+      const ok = await modal({ title: 'Approve this letter now?', body: `It will skip the remaining steps (currently “${esc(STATUS[letter.status] || letter.status)}”), produce the final locked PDF and notify the department. This is recorded in the history.`, confirmText: 'Approve & lock now', confirmClass: 'btn-success' });
+      if (ok) return run(button, 'POST', `/letters/${letter.id}/md-approve`, { response_text: text }, 'Approved by MD override. The final PDF is ready.');
+      return;
     }
     if (act === 'changes') {
       const details = await modal({ title: 'Request changes', body: 'Tell the team member what to change. They will be notified.', confirmText: 'Send back', confirmClass: 'btn-primary', input: { placeholder: 'e.g. Please confirm the delivery dates and add our payment terms.', required: true } });

@@ -513,32 +513,73 @@ def approve(actor, letter_id: int):
         letter = _get_letter(connection, letter_id)
         if actor["role"] != "md" or letter["status"] != "md_review":
             raise Forbidden("Only the MD can approve a letter in MD review")
-        pdf = _final_pdf(letter, actor)
-        now = utc_now()
-        connection.execute(
-            """
-            UPDATE letters
-            SET status = 'finalized', final_pdf = ?, finalized_at = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (pdf, now, now, letter_id),
-        )
-        _audit(connection, letter_id, actor["id"], "approved_and_finalized", "md_review", "finalized")
-        recipients = {letter["assigned_to"], letter["created_by"]}
-        recipients.update(
-            row["id"]
-            for row in connection.execute(
-                "SELECT id FROM users WHERE role = 'department_head' AND active = 1 AND department_id = ?",
-                (letter["department_id"],),
-            ).fetchall()
-        )
-        for user_id in recipients - {None, actor["id"]}:
-            _notify(connection, user_id, letter_id, "finalized", "Letter approved and finalized", f"{letter['reference']} was approved by the MD.")
+        _finalize(connection, letter, actor)
         connection.commit()
         logger.info("Letter %s finalized", letter["reference"])
         return _get_letter(connection, letter_id)
     finally:
         connection.close()
+
+
+def md_approve_now(actor, letter_id: int, response_text: str | None = None):
+    """MD override: approve an open letter at any stage, skipping the remaining steps."""
+    connection = connect()
+    try:
+        letter = _get_letter(connection, letter_id)
+        if actor["role"] != "md":
+            raise Forbidden("Only the MD can approve a letter directly")
+        if letter["status"] == "finalized":
+            raise Forbidden("This letter is already finalized")
+        text = (response_text if response_text is not None else letter["response_text"] or "").strip()
+        if not text:
+            raise BadRequest("Write the response before approving")
+        if text != (letter["response_text"] or "").strip():
+            connection.execute(
+                "UPDATE letters SET response_text = ?, updated_at = ? WHERE id = ?",
+                (text, utc_now(), letter_id),
+            )
+            _version(connection, letter_id, actor["id"], "response", text.encode("utf-8"), f"{letter['reference']}-response.txt", "Response written by the MD")
+        if letter["status"] != "md_review":
+            _audit(
+                connection,
+                letter_id,
+                actor["id"],
+                "md_override",
+                letter["status"],
+                "md_review",
+                {"skipped_from": letter["status"]},
+            )
+        _finalize(connection, _get_letter(connection, letter_id), actor)
+        connection.commit()
+        logger.info("Letter %s finalized by MD override", letter["reference"])
+        return _get_letter(connection, letter_id)
+    finally:
+        connection.close()
+
+
+def _finalize(connection, letter, actor) -> None:
+    letter_id = letter["id"]
+    pdf = _final_pdf(letter, actor)
+    now = utc_now()
+    connection.execute(
+        """
+        UPDATE letters
+        SET status = 'finalized', final_pdf = ?, finalized_at = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (pdf, now, now, letter_id),
+    )
+    _audit(connection, letter_id, actor["id"], "approved_and_finalized", "md_review", "finalized")
+    recipients = {letter["assigned_to"], letter["created_by"]}
+    recipients.update(
+        row["id"]
+        for row in connection.execute(
+            "SELECT id FROM users WHERE role = 'department_head' AND active = 1 AND department_id = ?",
+            (letter["department_id"],),
+        ).fetchall()
+    )
+    for user_id in recipients - {None, actor["id"]}:
+        _notify(connection, user_id, letter_id, "finalized", "Letter approved and finalized", f"{letter['reference']} was approved by the MD.")
 
 
 def request_changes(actor, letter_id: int, details: str):

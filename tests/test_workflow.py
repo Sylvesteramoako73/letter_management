@@ -229,3 +229,35 @@ def test_invalid_intake_details_are_rejected(client):
         content_type="multipart/form-data",
     )
     assert response.status_code == 400
+
+
+def test_md_can_approve_directly_at_any_stage(client):
+    client, department_id, _ = client
+    login(client, "frontdesk")
+    letter_id = client.post(
+        "/letters/upload",
+        data={
+            "sender": "Agency",
+            "subject": "Needs the MD today",
+            "received_date": "2026-09-24",
+            "department_id": str(department_id),
+            "document": (io.BytesIO(b"%PDF-1.4"), "scan.pdf"),
+        },
+        content_type="multipart/form-data",
+    ).get_json()["id"]
+
+    login(client, "head")
+    assert client.post(f"/letters/{letter_id}/md-approve", json={"response_text": "x"}).status_code == 403
+
+    login(client, "md")
+    assert client.post(f"/letters/{letter_id}/md-approve", json={"response_text": "  "}).status_code == 400
+    response = client.post(f"/letters/{letter_id}/md-approve", json={"response_text": "Approved as requested."})
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "finalized"
+    assert client.get(f"/letters/{letter_id}/pdf").data.startswith(b"%PDF")
+    actions = [event["action"] for event in client.get(f"/letters/{letter_id}/audit").get_json()]
+    assert actions[-2:] == ["md_override", "approved_and_finalized"]
+    assert client.post(f"/letters/{letter_id}/md-approve", json={"response_text": "again"}).status_code == 403
+
+    login(client, "head")
+    assert any(n["kind"] == "finalized" for n in client.get("/notifications").get_json())

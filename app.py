@@ -15,6 +15,7 @@ from workflow import (
     approve,
     assign_letter,
     create_letter,
+    md_approve_now,
     request_changes,
     route_to_md,
     save_response,
@@ -442,6 +443,12 @@ def create_app(test_config=None):
     @authenticated
     def approve_letter(user, letter_id):
         return jsonify(public_letter(approve(user, letter_id)))
+
+    @app.post("/letters/<int:letter_id>/md-approve")
+    @authenticated
+    def md_approve(user, letter_id):
+        payload = request.get_json(silent=True) or {}
+        return jsonify(public_letter(md_approve_now(user, letter_id, payload.get("response_text"))))
 
     @app.post("/letters/<int:letter_id>/request-changes")
     @authenticated
