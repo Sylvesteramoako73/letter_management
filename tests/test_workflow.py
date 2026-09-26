@@ -161,3 +161,71 @@ def test_role_scoped_team_member_directory(client):
     assert response.get_json()[0]["display_name"] == "Administration Team Member"
     login(client, "member")
     assert client.get("/team-members").status_code == 403
+
+
+def test_intake_details_notifications_and_search(client):
+    client, department_id, users = client
+    login(client, "frontdesk")
+    response = client.post(
+        "/letters/upload",
+        data={
+            "sender": "Korle Bay Construction",
+            "subject": "Request for quotation",
+            "received_date": "2026-09-24",
+            "department_id": str(department_id),
+            "priority": "urgent",
+            "due_date": "2026-10-10",
+            "confidentiality": "confidential",
+            "agency_reference": "KBCS/PROC/118",
+            "document": (io.BytesIO(b"%PDF-1.4"), "quote.pdf"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 201
+    letter = response.get_json()
+    assert letter["reference"].startswith("SIGL-IN-")
+    assert (letter["priority"], letter["due_date"], letter["confidentiality"]) == ("urgent", "2026-10-10", "confidential")
+
+    login(client, "head")
+    assert any(n["kind"] == "new_letter" for n in client.get("/notifications").get_json())
+    client.post(f"/letters/{letter['id']}/assign", json={"assignee_id": users["member"]})
+    login(client, "member")
+    client.put(f"/letters/{letter['id']}/response", json={"response_text": "Quotation attached."})
+    client.post(f"/letters/{letter['id']}/submit")
+    login(client, "mdpa")
+    assert any(n["kind"] == "review" for n in client.get("/notifications").get_json())
+    client.post(f"/letters/{letter['id']}/route-to-md")
+
+    login(client, "md")
+    assert client.get("/me").get_json()["role"] == "md"
+    assert any(n["kind"] == "approval" for n in client.get("/notifications").get_json())
+    found = client.get("/letters?q=korle").get_json()
+    assert [row["id"] for row in found] == [letter["id"]]
+    assert found[0]["department_name"] and found[0]["assignee_name"] == "Administration Team Member"
+    client.post(f"/letters/{letter['id']}/approve")
+    pdf = client.get(f"/letters/{letter['id']}/pdf").data
+    assert pdf.startswith(b"%PDF")
+
+    login(client, "member")
+    kinds = {n["kind"] for n in client.get("/notifications").get_json()}
+    assert {"assignment", "finalized"} <= kinds
+    assert client.post("/notifications/read-all").status_code == 200
+    assert all(n["read_at"] for n in client.get("/notifications").get_json())
+
+
+def test_invalid_intake_details_are_rejected(client):
+    client, department_id, _ = client
+    login(client, "frontdesk")
+    response = client.post(
+        "/letters/upload",
+        data={
+            "sender": "Agency",
+            "subject": "Bad priority",
+            "received_date": "2026-09-24",
+            "department_id": str(department_id),
+            "priority": "whenever",
+            "document": (io.BytesIO(b"%PDF-1.4"), "scan.pdf"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 400

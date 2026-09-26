@@ -1,11 +1,15 @@
+import mimetypes
 import os
+import uuid
 from datetime import datetime, timezone
 from functools import wraps
+from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request, session, send_file
-from werkzeug.exceptions import HTTPException, Unauthorized
+from flask import Flask, jsonify, redirect, render_template, request, session, send_file
+from werkzeug.exceptions import BadRequest, Forbidden, HTTPException, Unauthorized
 from werkzeug.security import check_password_hash
 
+import storage
 from db import IntegrityError, connect, ensure_database, initialize, seed_demo_data, table_names
 from workflow import (
     approve,
@@ -19,7 +23,10 @@ from workflow import (
     get_editable_document,
     is_admin,
     route_to_department,
+    validate_source_file,
 )
+
+LETTER_DETAIL_FIELDS = ("agency_reference", "category", "priority", "confidentiality", "due_date", "notes")
 
 
 if __name__ == "__main__":
@@ -30,6 +37,21 @@ if __name__ == "__main__":
 
     load_dotenv(Path(__file__).with_name(".env.local"))
     load_dotenv(Path(__file__).with_name(".env"))
+
+
+_source_cache = {}
+
+
+def _source_bytes(letter) -> bytes:
+    """Scan bytes, keeping the last few in memory so page previews don't re-download."""
+    if not letter["source_storage_path"]:
+        return letter["source_document"]
+    key = letter["source_sha256"]
+    if key not in _source_cache:
+        if len(_source_cache) >= 4:
+            _source_cache.pop(next(iter(_source_cache)))
+        _source_cache[key] = storage.download(letter["source_storage_path"])
+    return _source_cache[key]
 
 
 def create_app(test_config=None):
@@ -75,6 +97,7 @@ def create_app(test_config=None):
         result.pop("source_document", None)
         result.pop("final_pdf", None)
         result.pop("editable_document", None)
+        result.pop("source_storage_path", None)
         return result
 
     def authenticated(view):
@@ -126,6 +149,24 @@ def create_app(test_config=None):
         session["user_id"] = user["id"]
         return jsonify(username=user["username"], role=user["role"])
 
+    @app.get("/me")
+    @authenticated
+    def me(user):
+        with connect() as connection:
+            department = None
+            if user["department_id"]:
+                department = connection.execute(
+                    "SELECT name FROM departments WHERE id = ?", (user["department_id"],)
+                ).fetchone()
+        return jsonify(
+            id=user["id"],
+            username=user["username"],
+            display_name=user["display_name"],
+            role=user["role"],
+            department_id=user["department_id"],
+            department_name=department["name"] if department else None,
+        )
+
     @app.post("/logout")
     @authenticated
     def logout(user):
@@ -172,6 +213,53 @@ def create_app(test_config=None):
             department_id,
             uploaded.filename,
             content,
+            {field: request.form.get(field) for field in LETTER_DETAIL_FIELDS},
+        )
+        return jsonify(public_letter(letter)), 201
+
+    @app.post("/uploads/sign")
+    @authenticated
+    def sign_upload(user):
+        """Let the browser upload large scans straight to storage, bypassing Vercel's 4.5 MB limit."""
+        if user["role"] != "front_desk":
+            raise Forbidden("Only front desk users can initiate intake")
+        payload = request.get_json(silent=True) or {}
+        filename = Path(str(payload.get("filename", ""))).name
+        try:
+            size = int(payload.get("size", 0))
+        except (TypeError, ValueError):
+            raise BadRequest("size must be a number") from None
+        validate_source_file(filename, size)
+        if not storage.enabled():
+            return jsonify(mode="direct")
+        path = f"incoming/{user['id']}/{uuid.uuid4().hex}/{filename}"
+        return jsonify(mode="storage", path=path, upload_url=storage.create_upload_url(path))
+
+    @app.post("/letters/upload-stored")
+    @authenticated
+    def upload_stored_letter(user):
+        payload = request.get_json(silent=True) or {}
+        path = str(payload.get("storage_path", ""))
+        if not storage.enabled() or not path.startswith(f"incoming/{user['id']}/"):
+            raise BadRequest("Upload the document before registering the letter")
+        fields = ("sender", "subject", "received_date", "department_id")
+        if any(not payload.get(field) for field in fields):
+            return jsonify(error="sender, subject, received_date and department_id are required"), 400
+        try:
+            department_id = int(payload["department_id"])
+        except (TypeError, ValueError):
+            return jsonify(error="department_id must be an integer"), 400
+        content = storage.download(path)
+        letter = create_letter(
+            user,
+            payload["sender"],
+            payload["subject"],
+            payload["received_date"],
+            department_id,
+            Path(path).name,
+            content,
+            {field: payload.get(field) for field in LETTER_DETAIL_FIELDS},
+            storage_path=path,
         )
         return jsonify(public_letter(letter)), 201
 
@@ -202,33 +290,47 @@ def create_app(test_config=None):
         search = request.args.get("q", "").strip()
         status = request.args.get("status", "").strip()
         priority = request.args.get("priority", "").strip()
+        filters = []
+        params = []
+        if user["role"] == "team_member":
+            filters.append("l.assigned_to = ?")
+            params.append(user["id"])
+        elif user["role"] == "front_desk":
+            filters.append("l.created_by = ?")
+            params.append(user["id"])
+        elif user["role"] == "department_head":
+            filters.append("l.department_id = ?")
+            params.append(user["department_id"])
+        if search:
+            filters.append("(l.reference LIKE ? OR l.sender LIKE ? OR l.subject LIKE ? OR l.agency_reference LIKE ?)")
+            params.extend([f"%{search}%"] * 4)
+        if status:
+            filters.append("l.status = ?")
+            params.append(status)
+        if priority:
+            filters.append("l.priority = ?")
+            params.append(priority)
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
         with connect() as connection:
-            filters = []
-            params = []
-            if user["role"] in {"md", "md_pa"}:
-                query = "SELECT * FROM letters"
-            elif user["role"] == "team_member":
-                query = "SELECT * FROM letters WHERE assigned_to = ?"
-                params.append(user["id"])
-            elif user["role"] == "front_desk":
-                query = "SELECT * FROM letters WHERE created_by = ?"
-                params.append(user["id"])
-            else:
-                query = "SELECT * FROM letters WHERE department_id = ?"
-                params.append(user["department_id"])
-            if search:
-                filters.append("(reference LIKE ? OR sender LIKE ? OR subject LIKE ?)")
-                params.extend([f"%{search}%"] * 3)
-            if status:
-                filters.append("status = ?")
-                params.append(status)
-            if priority:
-                filters.append("priority = ?")
-                params.append(priority)
-            if filters:
-                query += " AND " + " AND ".join(filters)
-            letters = connection.execute(query + " ORDER BY created_at DESC", params).fetchall()
-        return jsonify([public_letter(letter) for letter in letters])
+            letters = connection.execute(
+                f"""
+                SELECT l.id, l.reference, l.sender, l.subject, l.received_date, l.source_file,
+                       l.department_id, l.status, l.response_text, l.finalized_at, l.created_by,
+                       l.assigned_to, l.agency_reference, l.category, l.priority, l.confidentiality,
+                       l.due_date, l.notes, l.created_at, l.updated_at,
+                       d.name AS department_name,
+                       a.display_name AS assignee_name,
+                       c.display_name AS created_by_name
+                FROM letters l
+                JOIN departments d ON d.id = l.department_id
+                LEFT JOIN users a ON a.id = l.assigned_to
+                LEFT JOIN users c ON c.id = l.created_by
+                {where}
+                ORDER BY l.created_at DESC, l.id DESC
+                """,
+                params,
+            ).fetchall()
+        return jsonify([dict(letter) for letter in letters])
 
     @app.get("/letters/<int:letter_id>")
     @authenticated
@@ -241,14 +343,29 @@ def create_app(test_config=None):
 
             require_view(user, letter)
             events = connection.execute(
-                "SELECT a.*, u.display_name FROM audit_events a JOIN users u ON u.id = a.actor_id WHERE a.letter_id = ? ORDER BY a.id",
+                "SELECT a.*, u.display_name, u.role AS actor_role FROM audit_events a JOIN users u ON u.id = a.actor_id WHERE a.letter_id = ? ORDER BY a.id",
                 (letter_id,),
             ).fetchall()
+            names = connection.execute(
+                """
+                SELECT d.name AS department_name, a.display_name AS assignee_name, c.display_name AS created_by_name
+                FROM letters l
+                JOIN departments d ON d.id = l.department_id
+                LEFT JOIN users a ON a.id = l.assigned_to
+                LEFT JOIN users c ON c.id = l.created_by
+                WHERE l.id = ?
+                """,
+                (letter_id,),
+            ).fetchone()
             versions = connection.execute(
                 "SELECT id, version_number, version_type, file_name, file_sha256, change_summary, created_at FROM letter_versions WHERE letter_id = ? ORDER BY version_number DESC",
                 (letter_id,),
             ).fetchall()
-        return jsonify(letter=public_letter(letter), audit=[dict(row) for row in events], versions=[dict(row) for row in versions])
+        return jsonify(
+            letter={**public_letter(letter), **dict(names)},
+            audit=[dict(row) for row in events],
+            versions=[dict(row) for row in versions],
+        )
 
     @app.get("/notifications")
     @authenticated
@@ -271,6 +388,17 @@ def create_app(test_config=None):
                     notification_id,
                     user["id"],
                 ),
+            )
+            connection.commit()
+        return jsonify(ok=True)
+
+    @app.post("/notifications/read-all")
+    @authenticated
+    def mark_all_notifications_read(user):
+        with connect() as connection:
+            connection.execute(
+                "UPDATE notifications SET read_at = ? WHERE user_id = ? AND read_at IS NULL",
+                (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), user["id"]),
             )
             connection.commit()
         return jsonify(ok=True)
@@ -368,12 +496,40 @@ def create_app(test_config=None):
     @authenticated
     def source_document(user, letter_id):
         letter = get_source_document(user, letter_id)
+        inline = request.args.get("inline") == "1"
+        if letter["source_storage_path"]:
+            filename = None if inline else letter["source_file"]
+            return redirect(storage.signed_download_url(letter["source_storage_path"], filename))
         return send_file(
             __import__("io").BytesIO(letter["source_document"]),
-            mimetype="application/octet-stream",
-            as_attachment=True,
+            mimetype=mimetypes.guess_type(letter["source_file"])[0] or "application/octet-stream",
+            as_attachment=not inline,
             download_name=letter["source_file"],
         )
+
+    @app.get("/letters/<int:letter_id>/page/<int:page>")
+    @authenticated
+    def source_page(user, letter_id, page):
+        """One page of the scan as a JPEG, so every browser and phone can preview it (including TIFF)."""
+        import pymupdf
+
+        letter = get_source_document(user, letter_id)
+        content = _source_bytes(letter)
+        try:
+            document = pymupdf.open(stream=content, filetype=Path(letter["source_file"]).suffix.lstrip(".").lower() or "pdf")
+        except Exception:
+            return jsonify(error="This document cannot be previewed"), 422
+        with document:
+            if page >= document.page_count:
+                return jsonify(error="Page not found"), 404
+            target = document[page]
+            scale = min(3.0, 1100 / max(target.rect.width, 1))
+            image = target.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False).tobytes("jpeg", jpg_quality=82)
+            count = document.page_count
+        response = send_file(__import__("io").BytesIO(image), mimetype="image/jpeg")
+        response.headers["X-Page-Count"] = str(count)
+        response.headers["Cache-Control"] = "private, max-age=600"
+        return response
 
     @app.get("/letters/<int:letter_id>/editable")
     @authenticated

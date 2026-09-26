@@ -71,6 +71,15 @@ To copy an existing local SQLite database into PostgreSQL once:
 .venv\Scripts\python migrate_to_postgres.py
 ```
 
+### Large scans (Supabase Storage)
+
+Vercel rejects request and response bodies over 4.5 MB. Set `SUPABASE_URL` and
+`SUPABASE_SECRET_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`) and the browser uploads
+scans straight to a private `letters` bucket, which the app creates on first
+use; downloads are redirected to short-lived signed URLs. Without these
+settings, scans are stored in the database and uploads over 4.5 MB fail on
+Vercel.
+
 Tests always use a temporary SQLite file. To run them against PostgreSQL, point
 `TEST_DATABASE_URL` at a disposable database; the tests drop its `public` schema.
 

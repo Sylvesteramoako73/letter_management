@@ -141,10 +141,17 @@ def initialize(connection) -> None:
         "confidentiality": "TEXT NOT NULL DEFAULT 'internal'",
         "due_date": "TEXT",
         "notes": "TEXT",
+        "source_storage_path": "TEXT",
     }
     for name, definition in migrations.items():
         if name not in columns:
             connection.execute(f"ALTER TABLE letters ADD COLUMN {name} {definition}")
+    version_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(letter_versions)").fetchall()
+    }
+    if "storage_path" not in version_columns:
+        connection.execute("ALTER TABLE letter_versions ADD COLUMN storage_path TEXT")
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_letters_due_status ON letters(due_date, status)"
     )

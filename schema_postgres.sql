@@ -98,3 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_letter_created
     ON audit_events(letter_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_letters_due_status
     ON letters(due_date, status);
+
+-- Columns added after the first release.
+ALTER TABLE letters ADD COLUMN IF NOT EXISTS source_storage_path TEXT;
+ALTER TABLE letter_versions ADD COLUMN IF NOT EXISTS storage_path TEXT;
