@@ -6,3 +6,5 @@ letters.sqlite3
 storage/
 .env
 *.log
+.vercel
+.env*

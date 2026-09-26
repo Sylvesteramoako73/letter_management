@@ -7,7 +7,14 @@ from werkzeug.security import generate_password_hash
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DATABASE_PATH = "/tmp/letters.sqlite3" if os.environ.get("VERCEL") else str(BASE_DIR / "letters.sqlite3")
-DATABASE_PATH = os.environ.get("LETTER_DATABASE", DEFAULT_DATABASE_PATH)
+# A blank or in-memory value gives every connection its own empty database,
+# so the schema created at startup would be invisible to later requests.
+_configured_path = os.environ.get("LETTER_DATABASE", "").strip()
+DATABASE_PATH = (
+    _configured_path
+    if _configured_path and _configured_path != ":memory:"
+    else DEFAULT_DATABASE_PATH
+)
 
 
 def connect() -> sqlite3.Connection:
