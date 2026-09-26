@@ -123,13 +123,14 @@ def create_letter(actor, sender, subject, received_date, department_id, source_f
             raise BadRequest("The selected department does not exist")
         editable_document = to_editable_docx(source_file, content)
         reference = f"SIGL-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
-        cursor = connection.execute(
+        letter_id = connection.execute(
             """
             INSERT INTO letters
                 (reference, sender, subject, received_date, source_file,
                  source_sha256, source_document, editable_document, editable_filename,
                  department_id, status, created_by)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'intake', ?)
+            RETURNING id
             """,
             (
                 reference,
@@ -144,14 +145,14 @@ def create_letter(actor, sender, subject, received_date, department_id, source_f
                 department_id,
                 actor["id"],
             ),
-        )
-        _audit(connection, cursor.lastrowid, actor["id"], "intake_created", None, "intake")
-        _version(connection, cursor.lastrowid, actor["id"], "source", content, source_file, "Original scanned document")
-        _version(connection, cursor.lastrowid, actor["id"], "editable", editable_document, f"{Path(source_file).stem}.docx", "Generated editable document")
+        ).fetchone()["id"]
+        _audit(connection, letter_id, actor["id"], "intake_created", None, "intake")
+        _version(connection, letter_id, actor["id"], "source", content, source_file, "Original scanned document")
+        _version(connection, letter_id, actor["id"], "editable", editable_document, f"{Path(source_file).stem}.docx", "Generated editable document")
         connection.commit()
         if os.environ.get("SALES_NOTIFICATION_WEBHOOK"):
             logger.info("Hot-lead notification integration is configured for external dispatch")
-        return _get_letter(connection, cursor.lastrowid)
+        return _get_letter(connection, letter_id)
     finally:
         connection.close()
 

@@ -1,12 +1,12 @@
 import os
-import sqlite3
+from datetime import datetime, timezone
 from functools import wraps
 
 from flask import Flask, jsonify, render_template, request, session, send_file
 from werkzeug.exceptions import HTTPException, Unauthorized
 from werkzeug.security import check_password_hash
 
-from db import connect, ensure_database, initialize, seed_demo_data
+from db import IntegrityError, connect, ensure_database, initialize, seed_demo_data, table_names
 from workflow import (
     approve,
     assign_letter,
@@ -22,10 +22,26 @@ from workflow import (
 )
 
 
+if __name__ == "__main__":
+    # Local runs use the settings pulled with `vercel env pull .env.local`.
+    from pathlib import Path
+
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).with_name(".env.local"))
+    load_dotenv(Path(__file__).with_name(".env"))
+
+
 def create_app(test_config=None):
     app = Flask(__name__)
     app.config.from_mapping(
-        SECRET_KEY=os.environ.get("SECRET_KEY", "dev-only-change-this"),
+        # Blank counts as unset; the development key is never used on a deployment.
+        SECRET_KEY=os.environ.get("SECRET_KEY")
+        or (
+            None
+            if os.environ.get("VERCEL_ENV") in {"production", "preview"}
+            else "dev-only-change-this"
+        ),
     )
     if test_config:
         app.config.update(test_config)
@@ -88,12 +104,7 @@ def create_app(test_config=None):
     def health():
         with connect() as connection:
             connection.execute("SELECT 1").fetchone()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
         required = {"users", "departments", "letters", "audit_events"}
         if not required.issubset(tables):
             return jsonify(status="error", database="schema_not_ready"), 503
@@ -254,8 +265,12 @@ def create_app(test_config=None):
     def mark_notification_read(user, notification_id):
         with connect() as connection:
             connection.execute(
-                "UPDATE notifications SET read_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?",
-                (notification_id, user["id"]),
+                "UPDATE notifications SET read_at = ? WHERE id = ? AND user_id = ?",
+                (
+                    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                    notification_id,
+                    user["id"],
+                ),
             )
             connection.commit()
         return jsonify(ok=True)
@@ -266,7 +281,8 @@ def create_app(test_config=None):
         with connect() as connection:
             total = connection.execute("SELECT COUNT(*) AS value FROM letters").fetchone()["value"]
             overdue = connection.execute(
-                "SELECT COUNT(*) AS value FROM letters WHERE due_date < date('now') AND status != 'finalized'"
+                "SELECT COUNT(*) AS value FROM letters WHERE due_date < ? AND status != 'finalized'",
+                (datetime.now(timezone.utc).date().isoformat(),),
             ).fetchone()["value"]
             by_department = connection.execute(
                 """
@@ -429,12 +445,14 @@ def create_app(test_config=None):
             return jsonify(error="Department name is required"), 400
         with connect() as connection:
             try:
-                cursor = connection.execute("INSERT INTO departments(name) VALUES (?)", (name,))
+                department_id = connection.execute(
+                    "INSERT INTO departments(name) VALUES (?) RETURNING id", (name,)
+                ).fetchone()["id"]
                 connection.commit()
-            except sqlite3.IntegrityError:
+            except IntegrityError:
                 connection.rollback()
                 return jsonify(error="Department already exists or is invalid"), 409
-        return jsonify(id=cursor.lastrowid, name=name), 201
+        return jsonify(id=department_id, name=name), 201
 
     @app.post("/users")
     @admin_only
@@ -449,10 +467,11 @@ def create_app(test_config=None):
             return jsonify(error="Invalid role"), 400
         with connect() as connection:
             try:
-                cursor = connection.execute(
+                new_user_id = connection.execute(
                     """
                     INSERT INTO users(username, password_hash, display_name, role, department_id)
                     VALUES (?, ?, ?, ?, ?)
+                    RETURNING id
                     """,
                     (
                         payload["username"].strip(),
@@ -461,12 +480,12 @@ def create_app(test_config=None):
                         payload["role"],
                         payload.get("department_id"),
                     ),
-                )
+                ).fetchone()["id"]
                 connection.commit()
-            except sqlite3.IntegrityError:
+            except IntegrityError:
                 connection.rollback()
                 return jsonify(error="Username already exists or department is invalid"), 409
-        return jsonify(id=cursor.lastrowid), 201
+        return jsonify(id=new_user_id), 201
 
     @app.patch("/users/<int:user_id>")
     @admin_only

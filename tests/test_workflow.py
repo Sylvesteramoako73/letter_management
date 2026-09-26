@@ -1,4 +1,5 @@
 import io
+import os
 
 import pytest
 
@@ -7,6 +8,17 @@ import pytest
 def client(tmp_path, monkeypatch):
     database = tmp_path / "test.sqlite3"
     monkeypatch.setenv("LETTER_DATABASE", str(database))
+    # Never let tests reach a real database; set TEST_DATABASE_URL to run them on PostgreSQL.
+    monkeypatch.delenv("POSTGRES_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    test_database_url = os.environ.get("TEST_DATABASE_URL")
+    if test_database_url:
+        import psycopg
+
+        with psycopg.connect(test_database_url, autocommit=True) as connection:
+            connection.execute("DROP SCHEMA IF EXISTS public CASCADE")
+            connection.execute("CREATE SCHEMA public")
+        monkeypatch.setenv("DATABASE_URL", test_database_url)
     monkeypatch.setenv("SEED_DEMO_DATA", "1")
     import db
     import workflow

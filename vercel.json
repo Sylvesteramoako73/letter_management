@@ -7,6 +7,7 @@
       "config": {
         "includeFiles": [
           "schema.sql",
+          "schema_postgres.sql",
           "templates/**",
           "static/**",
           "document_conversion.py"

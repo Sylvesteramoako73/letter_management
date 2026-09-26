@@ -8,7 +8,8 @@ through the SIGL role hierarchy:
 ## Run
 
 1. Create a virtual environment and install `requirements.txt`.
-2. Set a strong `SECRET_KEY` and a writable `LETTER_DATABASE` path.
+2. Set a strong `SECRET_KEY`, and either `DATABASE_URL` or a writable
+   `LETTER_DATABASE` path (see [Database](#database)).
 3. Run `flask --app app run --host 127.0.0.1`.
 4. Run `pytest`.
 
@@ -43,11 +44,35 @@ initial department catalogue includes Administration, Finance and Accounts,
 Sales and Marketing, HR, and Civil; additional departments can be created by
 an administrator.
 
-Production settings are represented in `.env.example`. Set `DATABASE_URL` to a
-PostgreSQL connection string and `AUTH_MODE=entra` when the intranet identity
-provider is ready; local mode remains available for development. The current
-SQLite adapter is intentionally retained as the tested development path while
-the PostgreSQL repository migration is staged separately.
+Production settings are represented in `.env.example`. Set `AUTH_MODE=entra`
+when the intranet identity provider is ready; local mode remains available for
+development.
+
+## Database
+
+When `POSTGRES_URL` or `DATABASE_URL` is set, the app uses PostgreSQL
+([schema_postgres.sql](./schema_postgres.sql)); otherwise it uses SQLite at
+`LETTER_DATABASE` ([schema.sql](./schema.sql)). The schema is created
+automatically on startup.
+
+To run locally against the same database as Vercel:
+
+```text
+vercel env pull .env.local
+.venv\Scripts\python app.py
+```
+
+`python app.py` loads `.env.local`. Anything done locally then changes the live
+data.
+
+To copy an existing local SQLite database into PostgreSQL once:
+
+```text
+.venv\Scripts\python migrate_to_postgres.py
+```
+
+Tests always use a temporary SQLite file. To run them against PostgreSQL, point
+`TEST_DATABASE_URL` at a disposable database; the tests drop its `public` schema.
 
 ## Vercel deployment
 
@@ -56,16 +81,14 @@ these Vercel environment variables before deploying:
 
 ```text
 SECRET_KEY=<long-random-value>
+DATABASE_URL=<PostgreSQL connection string, e.g. from the Neon integration>
 SEED_DEMO_DATA=1
-VERCEL=1
 ```
 
-`SEED_DEMO_DATA=1` creates the local demonstration accounts and must not be
-used for production. Vercel's `/tmp` SQLite fallback is ephemeral and is only
-for demos; production must provide a persistent PostgreSQL or network database
-and set `LETTER_DATABASE` or complete the PostgreSQL adapter before relying on
-stored letters.
+`SEED_DEMO_DATA=1` creates the demonstration accounts (password `change-me`)
+and must not be used for production. Without a PostgreSQL URL, Vercel falls
+back to SQLite in `/tmp`, which is wiped between instances and is only for demos.
 
-The application initializes and verifies the SQLite schema on every cold start.
+The application initializes and verifies the database schema on every cold start.
 After changing deployment configuration, create a new Vercel deployment rather
 than relying on a previous function instance.
