@@ -9,12 +9,29 @@ from flask import Flask, jsonify, redirect, render_template, request, session, s
 from werkzeug.exceptions import BadRequest, Forbidden, HTTPException, Unauthorized
 from werkzeug.security import check_password_hash
 
+import collaboration
+import mailer
+import reminders
 import storage
+import workflow
 from db import IntegrityError, connect, ensure_database, initialize, seed_demo_data, table_names
+import letterhead
 from workflow import (
+    DOCX_MIME,
     approve,
     assign_letter,
     create_letter,
+    create_outgoing,
+    department_approve,
+    safe_filename,
+    set_department_code,
+    get_delivery_proof,
+    record_delivery,
+    record_dispatch,
+    set_tracking,
+    start_response,
+    update_register_details,
+    word_copy,
     md_approve_now,
     request_changes,
     route_to_md,
@@ -27,7 +44,10 @@ from workflow import (
     validate_source_file,
 )
 
-LETTER_DETAIL_FIELDS = ("agency_reference", "category", "priority", "confidentiality", "due_date", "notes")
+LETTER_DETAIL_FIELDS = (
+    "agency_reference", "category", "priority", "confidentiality", "due_date", "notes",
+    "letter_date", "signatory", "cc_parties", "received_via", "action_required",
+)
 
 
 if __name__ == "__main__":
@@ -71,6 +91,16 @@ def create_app(test_config=None):
 
     ensure_database()
 
+    @app.after_request
+    def send_notification_emails(response):
+        if mailer.configured() and request.method in {"POST", "PUT", "PATCH", "DELETE"} and response.status_code < 400:
+            try:
+                with connect() as connection:
+                    mailer.flush(connection)
+            except Exception:
+                app.logger.exception("Sending notification emails failed")
+        return response
+
     @app.errorhandler(HTTPException)
     def handle_http_error(error):
         return jsonify(error=error.description), error.code
@@ -98,6 +128,10 @@ def create_app(test_config=None):
         result.pop("source_document", None)
         result.pop("final_pdf", None)
         result.pop("editable_document", None)
+        approved_word = result.pop("response_document", None)
+        # A Word copy can be downloaded while the letter has content, or once an approved copy is kept.
+        result["has_word_draft"] = bool(result.get("body_html") or approved_word)
+        result["has_delivery_proof"] = bool(result.pop("delivery_proof", None))
         result.pop("source_storage_path", None)
         return result
 
@@ -166,7 +200,59 @@ def create_app(test_config=None):
             role=user["role"],
             department_id=user["department_id"],
             department_name=department["name"] if department else None,
+            email=user["email"],
+            has_signature=bool(user["signature"]),
+            email_enabled=mailer.configured(),
         )
+
+    @app.patch("/me")
+    @authenticated
+    def update_me(user):
+        payload = request.get_json(silent=True) or {}
+        email = str(payload.get("email") or "").strip() or None
+        if email and ("@" not in email or len(email) > 200):
+            return jsonify(error="Enter a valid email address"), 400
+        with connect() as connection:
+            connection.execute("UPDATE users SET email = ? WHERE id = ?", (email, user["id"]))
+            connection.commit()
+        return jsonify(ok=True, email=email)
+
+    @app.post("/me/password")
+    @authenticated
+    def change_password(user):
+        from werkzeug.security import generate_password_hash
+
+        payload = request.get_json(silent=True) or {}
+        if not check_password_hash(user["password_hash"], payload.get("current", "")):
+            return jsonify(error="Your current password is not correct"), 400
+        if len(payload.get("new", "")) < 8:
+            return jsonify(error="The new password must be at least 8 characters"), 400
+        with connect() as connection:
+            connection.execute("UPDATE users SET password_hash = ? WHERE id = ?", (generate_password_hash(payload["new"]), user["id"]))
+            connection.commit()
+        return jsonify(ok=True)
+
+    @app.get("/me/signature")
+    @authenticated
+    def my_signature(user):
+        if not user["signature"]:
+            return jsonify(error="No signature uploaded"), 404
+        return send_file(__import__("io").BytesIO(bytes(user["signature"])), mimetype="image/png")
+
+    @app.put("/me/signature")
+    @authenticated
+    def upload_signature(user):
+        uploaded = request.files.get("signature")
+        if uploaded is None or not uploaded.filename:
+            return jsonify(error="Choose the signature image"), 400
+        collaboration.set_signature(user, uploaded.read())
+        return jsonify(ok=True)
+
+    @app.delete("/me/signature")
+    @authenticated
+    def remove_signature(user):
+        collaboration.set_signature(user, None)
+        return jsonify(ok=True)
 
     @app.post("/logout")
     @authenticated
@@ -294,17 +380,21 @@ def create_app(test_config=None):
         filters = []
         params = []
         if user["role"] == "team_member":
-            filters.append("l.assigned_to = ?")
-            params.append(user["id"])
+            filters.append("(l.assigned_to = ? OR l.created_by = ?)")
+            params.extend([user["id"], user["id"]])
         elif user["role"] == "front_desk":
-            filters.append("l.created_by = ?")
+            # Matches workflow.can_view: their own registrations plus approved letters to dispatch.
+            filters.append("(l.created_by = ? OR (l.direction = 'outgoing' AND l.status = 'finalized'))")
             params.append(user["id"])
         elif user["role"] == "department_head":
             filters.append("l.department_id = ?")
             params.append(user["department_id"])
         if search:
-            filters.append("(l.reference LIKE ? OR l.sender LIKE ? OR l.subject LIKE ? OR l.agency_reference LIKE ?)")
-            params.extend([f"%{search}%"] * 4)
+            filters.append(
+                "(l.reference LIKE ? OR l.sender LIKE ? OR l.subject LIKE ? OR l.agency_reference LIKE ?"
+                " OR l.our_reference LIKE ? OR l.signatory LIKE ? OR l.cc_parties LIKE ?)"
+            )
+            params.extend([f"%{search}%"] * 7)
         if status:
             filters.append("l.status = ?")
             params.append(status)
@@ -319,13 +409,22 @@ def create_app(test_config=None):
                        l.department_id, l.status, l.response_text, l.finalized_at, l.created_by,
                        l.assigned_to, l.agency_reference, l.category, l.priority, l.confidentiality,
                        l.due_date, l.notes, l.created_at, l.updated_at,
+                       l.direction, l.letter_date, l.signatory, l.cc_parties, l.our_reference,
+                       l.matter_status, l.status_remarks, l.received_via, l.action_required,
+                       l.addressee, l.in_reply_to, l.dispatch_status, l.dispatch_method,
+                       l.dispatched_on, l.delivered_on, l.delivery_note,
                        d.name AS department_name,
                        a.display_name AS assignee_name,
-                       c.display_name AS created_by_name
+                       c.display_name AS created_by_name,
+                       p.reference AS in_reply_to_reference,
+                       r.id AS response_id, r.our_reference AS response_reference,
+                       r.status AS response_status, r.dispatch_status AS response_dispatch_status
                 FROM letters l
                 JOIN departments d ON d.id = l.department_id
                 LEFT JOIN users a ON a.id = l.assigned_to
                 LEFT JOIN users c ON c.id = l.created_by
+                LEFT JOIN letters p ON p.id = l.in_reply_to
+                LEFT JOIN letters r ON r.id = (SELECT MAX(x.id) FROM letters x WHERE x.in_reply_to = l.id)
                 {where}
                 ORDER BY l.created_at DESC, l.id DESC
                 """,
@@ -362,15 +461,48 @@ def create_app(test_config=None):
                 "SELECT id, version_number, version_type, file_name, file_sha256, change_summary, created_at FROM letter_versions WHERE letter_id = ? ORDER BY version_number DESC",
                 (letter_id,),
             ).fetchall()
+            linked = """
+                SELECT id, reference, our_reference, subject, sender, status, dispatch_status,
+                       dispatched_on, delivered_on, finalized_at, created_at
+                FROM letters
+            """
+            responses = connection.execute(f"{linked} WHERE in_reply_to = ? ORDER BY id", (letter_id,)).fetchall()
+            original = (
+                connection.execute(f"{linked} WHERE id = ?", (letter["in_reply_to"],)).fetchone()
+                if letter["in_reply_to"]
+                else None
+            )
+            dispatcher = (
+                connection.execute("SELECT display_name FROM users WHERE id = ?", (letter["dispatched_by"],)).fetchone()
+                if letter["dispatched_by"]
+                else None
+            )
+            enclosures = collaboration.list_enclosures(connection, letter_id)
+            comments = collaboration.list_comments(connection, letter_id)
+            signer = workflow.signatory(connection, letter) if letter["direction"] == "outgoing" else None
         return jsonify(
-            letter={**public_letter(letter), **dict(names)},
+            letter={
+                **public_letter(letter),
+                **dict(names),
+                "dispatched_by_name": dispatcher["display_name"] if dispatcher else None,
+            },
             audit=[dict(row) for row in events],
             versions=[dict(row) for row in versions],
+            responses=[dict(row) for row in responses],
+            in_reply_to_letter=dict(original) if original else None,
+            enclosures=enclosures,
+            comments=comments,
+            signatory={key: signer[key] for key in ("id", "name", "title")} | {"has_signature": bool(signer["signature"])} if signer else None,
         )
 
     @app.get("/notifications")
     @authenticated
     def notifications(user):
+        # Deadline notices go out once a day; this covers days the scheduled job does not run.
+        try:
+            reminders.run_daily()
+        except Exception:
+            app.logger.exception("Deadline notices failed")
         with connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 100",
@@ -426,13 +558,18 @@ def create_app(test_config=None):
     @authenticated
     def response(user, letter_id):
         payload = request.get_json(silent=True) or {}
-        letter = save_response(user, letter_id, payload.get("response_text", ""))
+        letter = save_response(user, letter_id, payload.get("body_html"), payload.get("response_text", ""))
         return jsonify(public_letter(letter))
 
     @app.post("/letters/<int:letter_id>/submit")
     @authenticated
     def submit(user, letter_id):
         return jsonify(public_letter(submit_for_review(user, letter_id)))
+
+    @app.post("/letters/<int:letter_id>/department-approve")
+    @authenticated
+    def approve_for_department(user, letter_id):
+        return jsonify(public_letter(department_approve(user, letter_id)))
 
     @app.post("/letters/<int:letter_id>/route-to-md")
     @authenticated
@@ -496,7 +633,7 @@ def create_app(test_config=None):
             __import__("io").BytesIO(letter["final_pdf"]),
             mimetype="application/pdf",
             as_attachment=True,
-            download_name=f"{letter['reference']}.pdf",
+            download_name=f"{safe_filename(letter['our_reference'] or letter['reference'])}.pdf",
         )
 
     @app.get("/letters/<int:letter_id>/source")
@@ -549,12 +686,275 @@ def create_app(test_config=None):
             download_name=letter["editable_filename"],
         )
 
+    @app.post("/letters/outgoing")
+    @authenticated
+    def new_outgoing(user):
+        payload = request.get_json(silent=True) or {}
+        return jsonify(public_letter(create_outgoing(user, payload))), 201
+
+    @app.post("/letters/<int:letter_id>/respond")
+    @authenticated
+    def respond(user, letter_id):
+        return jsonify(public_letter(start_response(user, letter_id)))
+
+    @app.get("/letters/<int:letter_id>/response-docx")
+    @authenticated
+    def response_docx(user, letter_id):
+        name, content = word_copy(user, letter_id)
+        return send_file(__import__("io").BytesIO(content), mimetype=DOCX_MIME, as_attachment=True, download_name=name)
+
+    @app.post("/letters/<int:letter_id>/matter-status")
+    @authenticated
+    def matter_status(user, letter_id):
+        return jsonify(public_letter(set_tracking(user, letter_id, request.get_json(silent=True) or {})))
+
+    @app.post("/letters/<int:letter_id>/dispatch")
+    @authenticated
+    def dispatch(user, letter_id):
+        payload = request.get_json(silent=True) or {}
+        return jsonify(public_letter(record_dispatch(user, letter_id, payload.get("method"), payload.get("sent_on"), payload.get("note"))))
+
+    @app.post("/letters/<int:letter_id>/delivery")
+    @authenticated
+    def delivery(user, letter_id):
+        uploaded = request.files.get("proof")
+        proof = (uploaded.filename, uploaded.read()) if uploaded and uploaded.filename else None
+        letter = record_delivery(
+            user,
+            letter_id,
+            request.form.get("outcome"),
+            request.form.get("delivered_on"),
+            request.form.get("note"),
+            close=request.form.get("close") in {"1", "true", "on"},
+            proof=proof,
+        )
+        return jsonify(public_letter(letter))
+
+    @app.get("/letters/<int:letter_id>/delivery-proof")
+    @authenticated
+    def delivery_proof(user, letter_id):
+        letter = get_delivery_proof(user, letter_id)
+        return send_file(
+            __import__("io").BytesIO(letter["delivery_proof"]),
+            mimetype=mimetypes.guess_type(letter["delivery_proof_filename"])[0] or "application/octet-stream",
+            as_attachment=True,
+            download_name=letter["delivery_proof_filename"],
+        )
+
+    @app.patch("/letters/<int:letter_id>/details")
+    @authenticated
+    def edit_details(user, letter_id):
+        payload = request.get_json(silent=True) or {}
+        return jsonify(public_letter(update_register_details(user, letter_id, payload)))
+
+    @app.get("/letters/<int:letter_id>/folder.zip")
+    @authenticated
+    def letter_folder(user, letter_id):
+        """Everything held for one letter in a single folder: scan, details, history, Word draft and final PDF."""
+        import zipfile
+        from io import BytesIO
+
+        from workflow import require_view
+
+        with connect() as connection:
+            letter = connection.execute("SELECT * FROM letters WHERE id = ?", (letter_id,)).fetchone()
+            if letter is None:
+                return jsonify(error="Letter not found"), 404
+            require_view(user, letter)
+            names = connection.execute(
+                """
+                SELECT d.name AS department_name, a.display_name AS assignee_name, c.display_name AS created_by_name
+                FROM letters l
+                JOIN departments d ON d.id = l.department_id
+                LEFT JOIN users a ON a.id = l.assigned_to
+                LEFT JOIN users c ON c.id = l.created_by
+                WHERE l.id = ?
+                """,
+                (letter_id,),
+            ).fetchone()
+            events = connection.execute(
+                "SELECT a.*, u.display_name FROM audit_events a JOIN users u ON u.id = a.actor_id WHERE a.letter_id = ? ORDER BY a.id",
+                (letter_id,),
+            ).fetchall()
+            # A received letter's folder also archives the approved replies sent for it.
+            enclosures = connection.execute(
+                "SELECT file_name, content FROM letter_enclosures WHERE letter_id = ? ORDER BY id", (letter_id,)
+            ).fetchall()
+            discussion = collaboration.list_comments(connection, letter_id)
+            replies = connection.execute(
+                "SELECT our_reference, final_pdf FROM letters WHERE in_reply_to = ? AND final_pdf IS NOT NULL ORDER BY id",
+                (letter_id,),
+            ).fetchall()
+        folder = safe_filename(letter["reference"])
+        outgoing = letter["direction"] == "outgoing"
+        details = [
+            ("Register number", letter["reference"]),
+            ("Our reference", letter["our_reference"]),
+            ("Direction", "Outgoing" if outgoing else "Incoming"),
+            ("Date registered", letter["created_at"]),
+            ("Subject", letter["subject"]),
+            ("Addressee", letter["addressee"]),
+            ("To institution" if outgoing else "Institute / organisation", letter["sender"]),
+            ("Address", letter["recipient_address"]),
+            ("Received via", letter["received_via"]),
+            ("Action required", letter["action_required"]),
+            ("Deadline", letter["due_date"]),
+            ("Date on letter", letter["letter_date"]),
+            ("Reference on letter", letter["agency_reference"]),
+            ("Signed by", letter["signatory"]),
+            ("Copied parties", letter["cc_parties"]),
+            ("Date received", None if outgoing else letter["received_date"]),
+            ("Department", names["department_name"]),
+            ("Assigned to", names["assignee_name"]),
+            ("Registered by", names["created_by_name"]),
+            ("Status", (letter["matter_status"] or "open").title()),
+            ("Remarks", letter["status_remarks"]),
+            ("Workflow stage", letter["status"]),
+            ("Finalised", letter["finalized_at"]),
+            ("Dispatch", letter["dispatch_status"]),
+            ("Dispatch method", letter["dispatch_method"]),
+            ("Date sent", letter["dispatched_on"]),
+            ("Delivered / returned on", letter["delivered_on"]),
+            ("Delivery note", letter["delivery_note"]),
+        ]
+        text = "\n".join(f"{label}: {value}" for label, value in details if value)
+        history = "\n".join(
+            f"{event['created_at']}  {event['display_name']}: {event['action'].replace('_', ' ')}"
+            + (f"  {event['details']}" if event["details"] else "")
+            for event in events
+        )
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(f"{folder}/Register details.txt", text)
+            archive.writestr(f"{folder}/History.txt", history)
+            if discussion:
+                archive.writestr(f"{folder}/Input and responses.txt", "\n\n".join(
+                    f"{'    ' if c['parent_id'] else ''}{c['created_at']}  {c['author_name']}: {c['body']}" for c in discussion
+                ))
+            for number, enclosure in enumerate(enclosures, start=1):
+                archive.writestr(f"{folder}/Enclosures/{number} - {enclosure['file_name']}", bytes(enclosure["content"]))
+            if letter["source_file"]:
+                archive.writestr(f"{folder}/Original - {Path(letter['source_file']).name}", _source_bytes(letter))
+            if letter["response_document"] or letter["body_html"]:
+                name, content = word_copy(user, letter_id)
+                archive.writestr(f"{folder}/{name}", content)
+            if letter["final_pdf"]:
+                archive.writestr(f"{folder}/{safe_filename(letter['our_reference'] or letter['reference'])}.pdf", letter["final_pdf"])
+            if letter["delivery_proof"]:
+                archive.writestr(f"{folder}/Proof of delivery - {letter['delivery_proof_filename']}", letter["delivery_proof"])
+            for reply in replies:
+                archive.writestr(f"{folder}/Responses/{safe_filename(reply['our_reference'])}.pdf", reply["final_pdf"])
+        buffer.seek(0)
+        return send_file(buffer, mimetype="application/zip", as_attachment=True, download_name=f"{folder}.zip")
+
+    @app.post("/letters/<int:letter_id>/enclosures")
+    @authenticated
+    def add_enclosure(user, letter_id):
+        uploaded = request.files.get("file")
+        if uploaded is None or not uploaded.filename:
+            return jsonify(error="Choose a file to enclose"), 400
+        enclosure_id = collaboration.add_enclosure(user, letter_id, uploaded.filename, uploaded.read())
+        return jsonify(id=enclosure_id), 201
+
+    @app.get("/letters/<int:letter_id>/enclosures/<int:enclosure_id>")
+    @authenticated
+    def enclosure(user, letter_id, enclosure_id):
+        name, content = collaboration.get_enclosure(user, letter_id, enclosure_id)
+        return send_file(
+            __import__("io").BytesIO(content),
+            mimetype=mimetypes.guess_type(name)[0] or "application/octet-stream",
+            as_attachment=True,
+            download_name=name,
+        )
+
+    @app.delete("/letters/<int:letter_id>/enclosures/<int:enclosure_id>")
+    @authenticated
+    def delete_enclosure(user, letter_id, enclosure_id):
+        collaboration.remove_enclosure(user, letter_id, enclosure_id)
+        return jsonify(ok=True)
+
+    @app.get("/letters/<int:letter_id>/pack.pdf")
+    @authenticated
+    def letter_pack(user, letter_id):
+        name, content, skipped = collaboration.letter_pack(user, letter_id)
+        response = send_file(__import__("io").BytesIO(content), mimetype="application/pdf", as_attachment=True, download_name=name)
+        response.headers["X-Not-Included"] = ", ".join(skipped)
+        return response
+
+    @app.put("/letters/<int:letter_id>/signatory")
+    @authenticated
+    def choose_signatory(user, letter_id):
+        payload = request.get_json(silent=True) or {}
+        return jsonify(public_letter(workflow.set_signatory(user, letter_id, payload.get("signatory_id"))))
+
+    @app.get("/signatories")
+    @authenticated
+    def list_signatories(user):
+        try:
+            department_id = int(request.args.get("department_id", ""))
+        except ValueError:
+            return jsonify(error="department_id must be an integer"), 400
+        return jsonify(workflow.signatories(user, department_id))
+
+    @app.post("/letters/<int:letter_id>/comments")
+    @authenticated
+    def add_comment(user, letter_id):
+        payload = request.get_json(silent=True) or {}
+        comment_id = collaboration.add_comment(user, letter_id, payload.get("body"), payload.get("parent_id"))
+        return jsonify(id=comment_id), 201
+
+    @app.get("/letters/<int:letter_id>/signature")
+    @authenticated
+    def signature_status(user, letter_id):
+        """Check the stored approved PDF still carries an intact signature."""
+        from workflow import require_view
+
+        with connect() as connection:
+            letter = connection.execute("SELECT * FROM letters WHERE id = ?", (letter_id,)).fetchone()
+            if letter is None:
+                return jsonify(error="Letter not found"), 404
+            require_view(user, letter)
+            if not letter["final_pdf"]:
+                return jsonify(signed=False)
+            import signing
+
+            result = signing.verify_pdf(connection, bytes(letter["final_pdf"]))
+        return jsonify(result)
+
+    @app.post("/verify")
+    @authenticated
+    def verify(user):
+        uploaded = request.files.get("document")
+        if uploaded is None or not uploaded.filename:
+            return jsonify(error="Choose the PDF to check"), 400
+        return jsonify(collaboration.verify_letter(user, uploaded.read()))
+
+    @app.get("/tasks/deadline-notices")
+    def deadline_notices():
+        """Daily job (Vercel cron). Vercel sends CRON_SECRET as a bearer token."""
+        secret = os.environ.get("CRON_SECRET", "")
+        if not secret or request.headers.get("Authorization") != f"Bearer {secret}":
+            raise Unauthorized("Not allowed")
+        sent = reminders.run_daily()
+        with connect() as connection:
+            emailed = mailer.flush(connection)
+        return jsonify(sent=sent, emailed=emailed)
+
     @app.get("/departments")
     @authenticated
     def departments(user):
         with connect() as connection:
             rows = connection.execute("SELECT * FROM departments ORDER BY name").fetchall()
-        return jsonify([dict(row) for row in rows])
+        return jsonify([
+            {**dict(row), "code": row["code"] or letterhead.department_code(row["name"]), "code_is_default": not row["code"]}
+            for row in rows
+        ])
+
+    @app.patch("/departments/<int:department_id>")
+    @authenticated
+    def update_department(user, department_id):
+        payload = request.get_json(silent=True) or {}
+        return jsonify(id=department_id, code=set_department_code(user, department_id, payload.get("code", "")))
 
     @app.get("/team-members")
     @authenticated
@@ -592,7 +992,7 @@ def create_app(test_config=None):
             rows = connection.execute(
                 """
                 SELECT u.id, u.username, u.display_name, u.role, u.department_id,
-                       u.active, d.name AS department_name
+                       u.active, u.email, d.name AS department_name
                 FROM users u LEFT JOIN departments d ON d.id = u.department_id
                 ORDER BY u.display_name
                 """
@@ -632,8 +1032,8 @@ def create_app(test_config=None):
             try:
                 new_user_id = connection.execute(
                     """
-                    INSERT INTO users(username, password_hash, display_name, role, department_id)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO users(username, password_hash, display_name, role, department_id, email)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     RETURNING id
                     """,
                     (
@@ -642,6 +1042,7 @@ def create_app(test_config=None):
                         payload["display_name"].strip(),
                         payload["role"],
                         payload.get("department_id"),
+                        str(payload.get("email") or "").strip() or None,
                     ),
                 ).fetchone()["id"]
                 connection.commit()
@@ -653,13 +1054,24 @@ def create_app(test_config=None):
     @app.patch("/users/<int:user_id>")
     @admin_only
     def update_user(user, user_id):
+        from werkzeug.security import generate_password_hash
+
         payload = request.get_json(silent=True) or {}
-        if "active" not in payload:
-            return jsonify(error="Only active status can be changed"), 400
+        changes = {}
+        if "active" in payload:
+            changes["active"] = 1 if payload["active"] else 0
+        if "email" in payload:
+            changes["email"] = str(payload.get("email") or "").strip() or None
+        if payload.get("password"):
+            if len(payload["password"]) < 8:
+                return jsonify(error="The new password must be at least 8 characters"), 400
+            changes["password_hash"] = generate_password_hash(payload["password"])
+        if not changes:
+            return jsonify(error="Nothing to change"), 400
         with connect() as connection:
             cursor = connection.execute(
-                "UPDATE users SET active = ? WHERE id = ?",
-                (1 if payload["active"] else 0, user_id),
+                f"UPDATE users SET {', '.join(f'{field} = ?' for field in changes)} WHERE id = ?",
+                (*changes.values(), user_id),
             )
             connection.commit()
         if cursor.rowcount == 0:

@@ -2,7 +2,8 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS departments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE
+    name TEXT NOT NULL UNIQUE,
+    code TEXT
 );
 
 CREATE TABLE IF NOT EXISTS app_settings (
@@ -35,7 +36,7 @@ CREATE TABLE IF NOT EXISTS letters (
     editable_filename TEXT,
     department_id INTEGER NOT NULL REFERENCES departments(id),
     status TEXT NOT NULL CHECK (status IN (
-        'intake', 'assigned', 'in_progress', 'submitted_for_review',
+        'intake', 'assigned', 'in_progress', 'dept_review', 'submitted_for_review',
         'md_review', 'changes_requested', 'approved', 'finalized'
     )),
     response_text TEXT,
@@ -49,6 +50,31 @@ CREATE TABLE IF NOT EXISTS letters (
     confidentiality TEXT NOT NULL DEFAULT 'internal' CHECK (confidentiality IN ('internal', 'confidential', 'restricted')),
     due_date TEXT,
     notes TEXT,
+    direction TEXT NOT NULL DEFAULT 'incoming',
+    letter_date TEXT,
+    signatory TEXT,
+    cc_parties TEXT,
+    our_reference TEXT,
+    matter_status TEXT NOT NULL DEFAULT 'open',
+    status_remarks TEXT,
+    response_document BLOB,
+    response_filename TEXT,
+    received_via TEXT,
+    action_required TEXT,
+    addressee TEXT,
+    recipient_address TEXT,
+    in_reply_to INTEGER REFERENCES letters(id),
+    dispatch_status TEXT,
+    dispatch_method TEXT,
+    dispatched_on TEXT,
+    dispatched_by INTEGER REFERENCES users(id),
+    dispatch_note TEXT,
+    delivered_on TEXT,
+    delivery_note TEXT,
+    delivery_proof BLOB,
+    delivery_proof_filename TEXT,
+    body_html TEXT,
+    signatory_id INTEGER REFERENCES users(id),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -97,3 +123,24 @@ CREATE INDEX IF NOT EXISTS idx_letters_department_status
     ON letters(department_id, status);
 CREATE INDEX IF NOT EXISTS idx_audit_letter_created
     ON audit_events(letter_id, created_at);
+
+CREATE TABLE IF NOT EXISTS letter_enclosures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    letter_id INTEGER NOT NULL REFERENCES letters(id),
+    file_name TEXT NOT NULL,
+    content BLOB NOT NULL,
+    size INTEGER NOT NULL,
+    uploaded_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_enclosures_letter ON letter_enclosures(letter_id);
+
+CREATE TABLE IF NOT EXISTS letter_comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    letter_id INTEGER NOT NULL REFERENCES letters(id),
+    parent_id INTEGER REFERENCES letter_comments(id),
+    author_id INTEGER NOT NULL REFERENCES users(id),
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_comments_letter ON letter_comments(letter_id, id);

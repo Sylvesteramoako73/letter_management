@@ -85,6 +85,10 @@ def create_upload_url(path: str) -> str:
     return f"{_base_url()}/storage/v1{result['url']}"
 
 
+def move(source: str, destination: str) -> None:
+    _request("POST", "/object/move", {"bucketId": BUCKET, "sourceKey": source, "destinationKey": destination})
+
+
 def download(path: str) -> bytes:
     return _request("GET", f"/object/{BUCKET}/{_object_path(path)}")
 

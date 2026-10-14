@@ -5,6 +5,25 @@ through the SIGL role hierarchy:
 
 `front_desk -> department_head -> team_member -> md_pa -> md -> finalized PDF`
 
+## Registers
+
+Letters live in two registers, both in the `letters` table (`direction`):
+
+- **Incoming** (received): registered by the front desk with the details on the
+  letter (locked afterwards; the MD or MD PA can correct them), routed to a
+  department and assigned. Action required, deadline, status
+  (open/closed/responded) and remarks are tracked throughout.
+- **Outgoing** (sent): a new letter, or a reply started with **Respond** on a
+  received letter (`in_reply_to`). Each gets an *our reference*
+  `SIGL/<institution initials>/<department code>/<serial>`, the serial counted
+  per institution. It is drafted in Word on letterhead, sent for approval
+  (MD PA, then MD, who can approve or return it), finalised as a locked PDF,
+  then dispatched (method, date) and tracked to delivery (date, note, optional
+  proof) before being closed.
+
+On approval a reply's Word draft is deleted, as the original process required;
+a new letter keeps an approved Word copy alongside the PDF.
+
 ## Run
 
 1. Create a virtual environment and install `requirements.txt`.

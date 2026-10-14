@@ -396,3 +396,183 @@ dl.facts dd{margin:0;font-weight:600;color:var(--ink-2);min-width:0;overflow-wra
   .row-side{grid-column:2;flex-direction:row;align-items:center;justify-content:flex-start;flex-wrap:wrap}
   .detail-head h2{font-size:1.2rem}
 }
+
+/* Register status, Word drafts, outgoing letters */
+.matter-open{background:var(--blue-soft);color:var(--blue)}
+.matter-closed{background:var(--slate-soft);color:var(--slate)}
+.matter-responded{background:var(--green-soft);color:var(--green)}
+.chip.out{background:var(--wine-soft);color:var(--wine)}
+.icon.inline{width:12px;height:12px;vertical-align:-1px}
+table.register td>span{display:block}
+table.register td.remarks{max-width:220px;font-size:.76rem;color:var(--ink-2)}
+.hint-text{margin:0;color:var(--muted);font-size:.76rem}
+.word-draft{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--wine-tint)}
+.word-draft .icon{width:26px;height:26px;color:var(--wine);flex:none}
+.word-draft strong{display:block;font-size:.84rem}
+.word-draft small{color:var(--muted);font-size:.72rem}
+.how-to{margin:0;padding-left:20px;font-size:.8rem;color:var(--ink-2);line-height:1.7}
+.file-btn{cursor:pointer}
+.file-btn.loading{opacity:.6;pointer-events:none}
+.draft-preview summary,.quick-reply summary{cursor:pointer;font-size:.78rem;font-weight:650;color:var(--wine);padding:4px 0}
+.draft-preview .response-box{margin-top:8px}
+.quick-reply[open]{display:grid;gap:12px}
+.remarks-text{margin:0;font-size:.82rem;white-space:pre-wrap}
+.dept-list li{align-items:center;gap:12px}
+.dept-list li>div{display:grid}
+.code-form{display:flex;align-items:center;gap:4px}
+.code-form input{width:76px;padding:6px 8px;text-transform:uppercase;font-size:.8rem}
+.ref-preview{margin-right:auto;font-size:.8rem;color:var(--muted)}
+.ref-preview b{color:var(--ink)}
+.modal-wide{width:min(640px,100%)}
+.modal-wide .form-grid{padding:12px 0 0}
+.paper{width:min(560px,92%);min-height:420px;margin:24px auto;background:#fff;box-shadow:0 4px 18px #0000001f;padding:28px 32px;font-size:.8rem;line-height:1.6}
+.paper-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;border-bottom:1.5px solid var(--wine);padding-bottom:6px;margin-bottom:18px}
+.paper-head strong{color:var(--wine);letter-spacing:.04em}
+.paper-head span{font-size:.72rem;font-weight:650;white-space:nowrap}
+.paper-text{white-space:pre-wrap}
+.viewer-body:has(.paper){place-items:start center}
+@media (max-width:520px){.paper{padding:18px}.paper-head{flex-direction:column}.dept-list li{flex-wrap:wrap}}
+
+/* Two registers, dispatch and delivery */
+.dispatch-pending{background:var(--amber-soft);color:var(--amber)}
+.dispatch-sent{background:var(--blue-soft);color:var(--blue)}
+.dispatch-delivered{background:var(--green-soft);color:var(--green)}
+.dispatch-returned{background:var(--red-soft);color:var(--red)}
+.register-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 20px 4px}
+.register-head h2{margin:0;font-size:1.05rem}
+.register-head p{margin:3px 0 0;color:var(--muted);font-size:.78rem}
+table.register td .sub.remarks{max-width:200px;margin-top:4px}
+table.register a{font-size:.76rem}
+.reply-link{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;text-decoration:none;color:var(--ink);background:#fff}
+.reply-link:hover{border-color:#d9c6c9;background:var(--wine-tint)}
+.reply-link>.icon:first-child{color:var(--wine);flex:none}
+.reply-link>.icon:last-child{margin-left:auto;color:var(--muted);flex:none}
+.reply-link span{display:grid;min-width:0}
+.reply-link small{color:var(--muted);font-size:.72rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.form-pair{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+label.check{display:flex;align-items:center;gap:8px;font-weight:500}
+label.check input{width:auto}
+.fact-line{margin:0;font-size:.8rem;line-height:1.5}
+.sep{border:0;border-top:1px solid var(--line);margin:4px 0}
+@media (max-width:520px){.form-pair{grid-template-columns:1fr}.register-head{flex-wrap:wrap}}
+
+/* Dedicated create buttons: receiving and sending are two separate lines */
+.side-actions{display:grid;gap:8px;margin:0 0 18px;padding-bottom:18px;border-bottom:1px solid #ffffff1f}
+.nav-item.side-action{background:#ffffff14;border:1px solid #ffffff2e;font-weight:650}
+.nav-item.side-action:hover{background:#ffffff24}
+.nav-item.side-action .side-action-kind{margin-left:auto;opacity:.55;width:15px;height:15px}
+.nav-item.side-action.active .side-action-kind{opacity:.8}
+.hero-actions{margin-left:auto;display:flex;flex-wrap:wrap;gap:10px;position:relative;z-index:1}
+.hero-actions .btn{margin-left:0}
+.instructions{border-left:3px solid var(--blue);background:var(--blue-soft);padding:10px 14px;border-radius:0 8px 8px 0;font-size:.8rem;white-space:pre-wrap}
+.instructions strong{display:block;margin-bottom:2px}
+@media (max-width:860px){.hero-actions{margin-left:0;width:100%}}
+
+/* The progress bar has 4 steps for received letters and 7 for sent ones: size to however many there are. */
+.stepper{grid-template-columns:none;grid-auto-flow:column;grid-auto-columns:1fr}
+.nav-item.side-action.active{background:#fff;color:var(--wine-dark);border-color:#fff}
+@media (max-width:860px){.stepper{grid-template-columns:none;grid-auto-columns:minmax(52px,1fr)}}
+
+/* In-app letter editor: a page on a desk, letterhead fixed at the top, toolbar kept in view */
+.editor-card{overflow:visible}
+.editor-card .card-head .btn-row{align-items:center}
+.editor-toolbar.ql-toolbar.ql-snow{position:sticky;top:73px;z-index:6;background:#fff;border:0;border-bottom:1px solid var(--line);padding:8px 14px;font-family:inherit}
+.editor-toolbar .ql-formats{margin-right:10px}
+.editor-toolbar .ed-undo,.editor-toolbar .ed-redo{width:28px;height:24px;padding:3px 5px}
+.editor-toolbar .ed-undo .icon,.editor-toolbar .ed-redo .icon{width:15px;height:15px;color:#444}
+.editor-toolbar .ed-redo .icon{transform:scaleX(-1)}
+.editor-desk{background:#eeeae8;padding:24px 16px;border-radius:0 0 var(--radius) var(--radius)}
+.editor-desk .paper{width:auto;max-width:640px;margin:0 auto;min-height:760px;padding:40px 48px;font-family:Calibri,Carlito,'Segoe UI',sans-serif;font-size:11pt;line-height:1.45;color:#111}
+.paper-head div{display:grid}
+.paper-head small{font-size:.62rem;font-style:italic;color:#666;font-weight:400}
+.editor-page .ql-container.ql-snow{border:0;font-family:inherit;font-size:inherit}
+.editor-page .ql-editor{padding:0;min-height:600px;line-height:inherit;overflow-y:visible}
+.editor-page .ql-editor:focus{outline:none}
+.save-state.ok{color:var(--green)}
+.save-state.error{color:var(--red);font-weight:650}
+/* The same formatting when the letter is shown read-only */
+.letter-body p,.letter-body li{margin:0}
+.letter-body h1{font-size:1.45em;margin:.3em 0}
+.letter-body h2{font-size:1.2em;margin:.3em 0}
+.letter-body ul,.letter-body ol{margin:0;padding-left:1.6em}
+.letter-body .ql-align-center{text-align:center}
+.letter-body .ql-align-right{text-align:right}
+.letter-body .ql-align-justify{text-align:justify}
+.letter-body .ql-indent-1{padding-left:3em}
+.letter-body .ql-indent-2{padding-left:6em}
+.letter-body .ql-indent-3{padding-left:9em}
+.letter-body .ql-size-small{font-size:.8em}
+.letter-body .ql-size-large{font-size:1.4em}
+.letter-body .ql-size-huge{font-size:2em}
+@media (max-width:860px){.editor-toolbar.ql-toolbar.ql-snow{top:64px}.editor-desk{padding:12px 6px}.editor-desk .paper{padding:22px 18px;min-height:0}.editor-page .ql-editor{min-height:360px}}
+
+/* The real company letterhead on screen (same artwork as the printed PDF) */
+.editor-desk .paper.lh-paper,.paper.lh-paper{padding:0;display:flex;flex-direction:column;background:#fff url(/static/letterhead/watermark.png) no-repeat center 22% / 84% auto}
+.lh-head,.lh-foot{display:block;width:100%;height:auto;user-select:none}
+.lh-foot{margin-top:auto}
+.lh-ref{text-align:right;font-size:8.5pt;color:#333;padding:2px 7% 0 0}
+.lh-body{flex:1;padding:16px 7.5% 32px 10%}
+.editor-desk .paper.lh-paper{min-height:900px}
+.editor-page .lh-body .ql-editor{min-height:560px}
+@media (max-width:860px){.editor-desk .paper.lh-paper{min-height:0}.lh-body{padding:10px 6% 20px 8%}}
+
+/* Tracking journey */
+.journey{list-style:none;margin:0;padding:6px 20px 18px}
+.journey li{position:relative;display:flex;gap:12px;padding:8px 0 8px 2px}
+.journey li:not(:last-child):before{content:"";position:absolute;left:7px;top:22px;bottom:-8px;width:2px;background:var(--line-2)}
+.journey .j-dot{flex:none;width:12px;height:12px;margin-top:4px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px var(--green-soft);position:relative;z-index:1}
+.journey li.latest .j-dot{background:var(--wine);box-shadow:0 0 0 3px var(--wine-soft)}
+.journey li.next .j-dot{background:#fff;border:2px dashed var(--wine);box-shadow:none}
+.journey strong{display:block;font-size:.8rem;font-weight:650}
+.journey small{color:var(--muted);font-size:.72rem}
+.journey li.next strong{color:var(--wine)}
+/* Enclosures */
+.enclosures{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.enclosures li{display:flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:9px;padding:4px 6px 4px 10px}
+.enclosures a{flex:1;min-width:0;display:flex;align-items:center;gap:10px;text-decoration:none;color:var(--ink)}
+.enclosures a span{display:grid;min-width:0}
+.enclosures strong{font-size:.8rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.enclosures small{color:var(--muted);font-size:.7rem}
+/* Input and responses */
+.c-list{list-style:none;margin:0;padding:0;display:grid;gap:14px}
+.c-thread{border:1px solid var(--line);border-radius:10px;padding:12px}
+.c-entry{display:flex;gap:10px}
+.avatar.sm{width:28px;height:28px;font-size:.66rem}
+.c-meta{margin:0;font-size:.72rem;color:var(--muted)}
+.c-meta strong{color:var(--ink)}
+.c-body{margin:3px 0 0;font-size:.82rem;white-space:pre-wrap;line-height:1.5}
+.c-replies{list-style:none;margin:10px 0 0 14px;padding:0 0 0 14px;border-left:2px solid var(--line);display:grid;gap:10px}
+.c-respond{margin-top:6px}
+.c-reply-box{display:grid;gap:8px;margin-top:6px}
+/* Signature, checking a letter, tracking box, account */
+.sig-status{padding:0 20px}
+.sig-line{margin:10px 0;font-size:.78rem;color:var(--muted)}
+.sig-line.ok{color:var(--green)}
+.sig-line.bad{color:var(--red);font-weight:650}
+.verify-result{display:flex;gap:12px;align-items:flex-start;padding:14px;border-radius:10px;margin-top:14px}
+.verify-result.ok{background:var(--green-soft);color:#0d5536}
+.verify-result.bad{background:var(--red-soft);color:#7c1a27}
+.verify-result .icon{flex:none;width:22px;height:22px}
+.verify-result p{margin:3px 0 0;font-size:.8rem}
+.track-form{margin-right:6px}
+.track-form .search{min-width:280px;background:#fff}
+.sidebar-user-link{display:flex;align-items:center;gap:10px;color:inherit;text-decoration:none;width:100%}
+.sidebar-user-link>.icon{margin-left:auto;width:16px;height:16px;opacity:.6}
+.sidebar-user-link:hover>.icon{opacity:1}
+.row-actions{display:flex;justify-content:flex-end;gap:2px;flex-wrap:wrap}
+.notif-desktop{display:flex;align-items:center;gap:8px;width:100%;padding:10px 16px;border:0;border-bottom:1px solid var(--line);background:var(--wine-tint);color:var(--wine);font-weight:650;font-size:.78rem;cursor:pointer}
+.notif-desktop .icon{width:15px;height:15px}
+.signature-preview{border:1px dashed var(--line-2);border-radius:10px;padding:14px;background:#fff;display:grid;place-items:center}
+.signature-preview img{max-height:90px;max-width:100%}
+@media (max-width:860px){.track-form{display:none}}
+
+/* Sign-off added from "Signed by": shown under the text, not editable */
+.closing-preview{margin-top:2px;padding-top:2px;color:#111;user-select:none}
+.closing-preview p{margin:0}
+.closing-preview p.gap{margin-top:1.45em}
+.closing-preview ol{margin:0;padding-left:1.6em}
+.sign-space{display:inline-block;margin:10px 0 6px;padding:10px 16px;border:1.5px dashed #c9b9bc;border-radius:6px;color:#8a7a7d;font-size:8.5pt;font-style:italic}
+.editor-head-side{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:flex-end}
+.signed-by{display:flex;align-items:center;gap:8px;font-size:.76rem;font-weight:650;white-space:nowrap}
+.signed-by select{padding:6px 30px 6px 10px;font-size:.78rem;width:auto}
+@media (max-width:860px){.editor-head-side{justify-content:flex-start}}

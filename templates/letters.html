@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#50131e">
   <title>SIGL Letter Desk</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23741d2b'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' fill='white' text-anchor='middle'%3ES%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/vendor/quill/quill.snow.css">
   <link rel="stylesheet" href="/static/letters.css">
 </head>
 <body>
@@ -13,7 +14,7 @@
     <div class="login-brand-panel">
       <div class="brand-lockup"><span class="brand-mark">S</span><span>SIGL</span></div>
       <div class="login-brand-copy">
-        <p class="eyebrow light">Swami India Ghana Limited</p>
+        <p class="eyebrow light">Swami SMS platform</p>
         <h1>Every letter.<br><em>Handled with purpose.</em></h1>
         <p>A secure command centre for receiving, routing and closing correspondence across the business.</p>
       </div>
@@ -47,6 +48,7 @@
         <button class="icon-button menu-toggle" id="menu-toggle" type="button" aria-label="Open menu"></button>
         <div class="topbar-title"><p class="eyebrow" id="crumb"></p><h1 id="page-title"></h1></div>
         <div class="topbar-actions">
+          <form id="track-form" class="track-form" role="search"><label class="search"><span class="sr-only">Track a letter by reference</span><input id="track-input" placeholder="Track a letter: type its reference" autocomplete="off"></label></form>
           <div class="bell-wrap">
             <button id="bell" class="icon-button" type="button" aria-label="Notifications" aria-expanded="false"></button>
             <div id="notif-panel" class="notif-panel hidden" role="dialog" aria-label="Notifications"></div>
@@ -59,6 +61,7 @@
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
   <div id="modal-root"></div>
+  <script src="/static/vendor/quill/quill.js"></script>
   <script src="/static/letters.js"></script>
 </body>
 </html>

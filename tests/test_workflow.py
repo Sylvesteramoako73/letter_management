@@ -45,6 +45,23 @@ def login(client, username):
     assert response.status_code == 200
 
 
+def respond(client, letter_id, text):
+    """Press Respond on a received letter and write the reply body; returns the outgoing letter's id."""
+    response = client.post(f"/letters/{letter_id}/respond")
+    assert response.status_code == 200, response.get_json()
+    reply_id = response.get_json()["id"]
+    assert client.put(f"/letters/{reply_id}/response", json={"response_text": text}).status_code == 200
+    return reply_id
+
+
+def head_approves(client, letter_id, head="head"):
+    """The department head passes a submitted draft on to the MD PA."""
+    login(client, head)
+    response = client.post(f"/letters/{letter_id}/department-approve")
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()["status"] == "submitted_for_review"
+
+
 def test_full_workflow_creates_locked_pdf_and_audit(client):
     client, department_id, users = client
     login(client, "frontdesk")
@@ -67,23 +84,32 @@ def test_full_workflow_creates_locked_pdf_and_audit(client):
         f"/letters/{letter_id}/assign", json={"assignee_id": users["member"]}
     ).status_code == 200
     login(client, "member")
+    # Replies are drafted as a separate outgoing letter, not on the received one.
     assert client.put(
         f"/letters/{letter_id}/response", json={"response_text": "Prepared response"}
-    ).status_code == 200
-    assert client.post(f"/letters/{letter_id}/submit").status_code == 200
+    ).status_code == 400
+    reply_id = respond(client, letter_id, "Prepared response")
+    submitted = client.post(f"/letters/{reply_id}/submit")
+    assert submitted.status_code == 200 and submitted.get_json()["status"] == "dept_review"
+    head_approves(client, reply_id)
     login(client, "mdpa")
-    assert client.post(f"/letters/{letter_id}/route-to-md").status_code == 200
+    assert client.post(f"/letters/{reply_id}/route-to-md").status_code == 200
     login(client, "md")
-    response = client.post(f"/letters/{letter_id}/approve")
+    response = client.post(f"/letters/{reply_id}/approve")
     assert response.status_code == 200
     assert response.get_json()["status"] == "finalized"
-    assert client.get(f"/letters/{letter_id}/pdf").status_code == 200
+    assert client.get(f"/letters/{reply_id}/pdf").status_code == 200
+    received = client.get(f"/letters/{letter_id}").get_json()
+    assert received["letter"]["status"] == "finalized"
+    assert received["letter"]["matter_status"] == "responded"
+    assert [r["id"] for r in received["responses"]] == [reply_id]
 
     login(client, "member")
     assert client.put(
-        f"/letters/{letter_id}/response", json={"response_text": "Tampered"}
+        f"/letters/{reply_id}/response", json={"response_text": "Tampered"}
     ).status_code == 403
-    assert len(client.get(f"/letters/{letter_id}/audit").get_json()) == 6
+    actions = [event["action"] for event in client.get(f"/letters/{letter_id}/audit").get_json()]
+    assert actions == ["intake_created", "assigned", "response_started", "response_approved"]
 
 
 def test_unauthorized_roles_cannot_intake_or_approve(client):
@@ -190,20 +216,23 @@ def test_intake_details_notifications_and_search(client):
     assert any(n["kind"] == "new_letter" for n in client.get("/notifications").get_json())
     client.post(f"/letters/{letter['id']}/assign", json={"assignee_id": users["member"]})
     login(client, "member")
-    client.put(f"/letters/{letter['id']}/response", json={"response_text": "Quotation attached."})
-    client.post(f"/letters/{letter['id']}/submit")
+    reply_id = respond(client, letter["id"], "Quotation attached.")
+    client.post(f"/letters/{reply_id}/submit")
+    head_approves(client, reply_id)
     login(client, "mdpa")
     assert any(n["kind"] == "review" for n in client.get("/notifications").get_json())
-    client.post(f"/letters/{letter['id']}/route-to-md")
+    client.post(f"/letters/{reply_id}/route-to-md")
 
     login(client, "md")
     assert client.get("/me").get_json()["role"] == "md"
     assert any(n["kind"] == "approval" for n in client.get("/notifications").get_json())
-    found = client.get("/letters?q=korle").get_json()
-    assert [row["id"] for row in found] == [letter["id"]]
-    assert found[0]["department_name"] and found[0]["assignee_name"] == "Administration Team Member"
-    client.post(f"/letters/{letter['id']}/approve")
-    pdf = client.get(f"/letters/{letter['id']}/pdf").data
+    found = {row["id"]: row for row in client.get("/letters?q=korle").get_json()}
+    assert set(found) == {letter["id"], reply_id}
+    assert found[letter["id"]]["department_name"] and found[letter["id"]]["assignee_name"] == "Administration Team Member"
+    assert found[letter["id"]]["response_id"] == reply_id
+    assert found[reply_id]["in_reply_to_reference"] == letter["reference"]
+    client.post(f"/letters/{reply_id}/approve")
+    pdf = client.get(f"/letters/{reply_id}/pdf").data
     assert pdf.startswith(b"%PDF")
 
     login(client, "member")
@@ -253,11 +282,14 @@ def test_md_can_approve_directly_at_any_stage(client):
     assert client.post(f"/letters/{letter_id}/md-approve", json={"response_text": "  "}).status_code == 400
     response = client.post(f"/letters/{letter_id}/md-approve", json={"response_text": "Approved as requested."})
     assert response.status_code == 200
-    assert response.get_json()["status"] == "finalized"
-    assert client.get(f"/letters/{letter_id}/pdf").data.startswith(b"%PDF")
-    actions = [event["action"] for event in client.get(f"/letters/{letter_id}/audit").get_json()]
+    reply = response.get_json()
+    assert reply["status"] == "finalized" and reply["in_reply_to"] == letter_id
+    assert client.get(f"/letters/{reply['id']}/pdf").data.startswith(b"%PDF")
+    actions = [event["action"] for event in client.get(f"/letters/{reply['id']}/audit").get_json()]
     assert actions[-2:] == ["md_override", "approved_and_finalized"]
+    assert client.get(f"/letters/{letter_id}").get_json()["letter"]["status"] == "finalized"
     assert client.post(f"/letters/{letter_id}/md-approve", json={"response_text": "again"}).status_code == 403
+    assert client.post(f"/letters/{reply['id']}/md-approve", json={"response_text": "again"}).status_code == 403
 
     login(client, "head")
     assert any(n["kind"] == "finalized" for n in client.get("/notifications").get_json())

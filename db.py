@@ -142,10 +142,54 @@ def initialize(connection) -> None:
         "due_date": "TEXT",
         "notes": "TEXT",
         "source_storage_path": "TEXT",
+        "direction": "TEXT NOT NULL DEFAULT 'incoming'",
+        "letter_date": "TEXT",
+        "signatory": "TEXT",
+        "cc_parties": "TEXT",
+        "our_reference": "TEXT",
+        "matter_status": "TEXT NOT NULL DEFAULT 'open'",
+        "status_remarks": "TEXT",
+        "response_document": "BLOB",
+        "response_filename": "TEXT",
+        "received_via": "TEXT",
+        "action_required": "TEXT",
+        "addressee": "TEXT",
+        "recipient_address": "TEXT",
+        "in_reply_to": "INTEGER REFERENCES letters(id)",
+        "dispatch_status": "TEXT",
+        "dispatch_method": "TEXT",
+        "dispatched_on": "TEXT",
+        "dispatched_by": "INTEGER REFERENCES users(id)",
+        "dispatch_note": "TEXT",
+        "delivered_on": "TEXT",
+        "delivery_note": "TEXT",
+        "delivery_proof": "BLOB",
+        "delivery_proof_filename": "TEXT",
+        "body_html": "TEXT",
+        "signatory_id": "INTEGER REFERENCES users(id)",
     }
     for name, definition in migrations.items():
         if name not in columns:
             connection.execute(f"ALTER TABLE letters ADD COLUMN {name} {definition}")
+    department_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(departments)").fetchall()
+    }
+    if "code" not in department_columns:
+        connection.execute("ALTER TABLE departments ADD COLUMN code TEXT")
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_letters_our_reference ON letters(our_reference)"
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_letters_in_reply_to ON letters(in_reply_to)")
+    _allow_department_review(connection)
+    for table, added in {
+        "users": {"email": "TEXT", "signature": "BLOB"},
+        "notifications": {"emailed_at": "TEXT"},
+    }.items():
+        existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+        for name, definition in added.items():
+            if name not in existing:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
     version_columns = {
         row["name"]
         for row in connection.execute("PRAGMA table_info(letter_versions)").fetchall()
@@ -156,6 +200,35 @@ def initialize(connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_letters_due_status ON letters(due_date, status)"
     )
     connection.commit()
+
+
+def _allow_department_review(connection) -> None:
+    """Older SQLite files reject the 'dept_review' stage; SQLite can only change a CHECK by rebuilding the table."""
+    table_sql = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'letters'"
+    ).fetchone()["sql"]
+    if "dept_review" in table_sql:
+        return
+    rebuilt = table_sql.replace("'submitted_for_review',", "'dept_review', 'submitted_for_review',", 1)
+    rebuilt = re.sub(r"^CREATE TABLE \"?letters\"?", "CREATE TABLE letters_rebuild", rebuilt)
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        connection.execute(rebuilt)
+        connection.execute("INSERT INTO letters_rebuild SELECT * FROM letters")
+        connection.execute("DROP TABLE letters")
+        connection.execute("ALTER TABLE letters_rebuild RENAME TO letters")
+        connection.commit()
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
+    # Dropping the table dropped its indexes too.
+    connection.executescript(_schema_file("schema.sql").read_text(encoding="utf-8"))
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS idx_letters_due_status ON letters(due_date, status)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_letters_our_reference ON letters(our_reference)",
+        "CREATE INDEX IF NOT EXISTS idx_letters_in_reply_to ON letters(in_reply_to)",
+    ):
+        connection.execute(statement)
 
 
 def ensure_database() -> None:

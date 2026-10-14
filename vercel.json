@@ -23,5 +23,11 @@
       "src": "/(.*)",
       "dest": "api/index.py"
     }
+  ],
+  "crons": [
+    {
+      "path": "/tasks/deadline-notices",
+      "schedule": "0 6 * * *"
+    }
   ]
 }
