@@ -18,6 +18,7 @@ from werkzeug.exceptions import BadRequest, Forbidden, NotFound
 
 import letterhead
 import signing
+from permissions import can
 import storage
 from db import connect
 from document_conversion import to_editable_docx
@@ -80,15 +81,29 @@ def _get_letter(connection, letter_id: int):
     return letter
 
 
+def collaboration_of(user, letter_id: int):
+    """This person's part in a letter, directly or through their department, if they were brought in.
+
+    Returns {"any": bool, "can_edit": bool}.
+    """
+    with connect() as connection:
+        rows = connection.execute(
+            "SELECT can_edit, user_id FROM letter_collaborators WHERE letter_id = ? AND (user_id = ? OR department_id = ?)",
+            (letter_id, user["id"], user["department_id"]),
+        ).fetchall()
+    return {"any": bool(rows), "can_edit": any(row["can_edit"] and row["user_id"] == user["id"] for row in rows)}
+
+
 def can_view(user, letter) -> bool:
-    if user["role"] in {"md", "md_pa"}:
+    if can(user, "all_letters") or user["id"] in {letter["assigned_to"], letter["created_by"]}:
         return True
-    if user["role"] == "team_member":
-        return user["id"] in {letter["assigned_to"], letter["created_by"]}
-    if user["role"] == "front_desk":
-        # The front desk dispatches approved letters, so it sees every one that is ready to go.
-        return user["id"] == letter["created_by"] or (is_outgoing(letter) and letter["status"] == "finalized")
-    return user["department_id"] == letter["department_id"]
+    # Whoever dispatches sees every approved letter that is ready to go.
+    if can(user, "dispatch_letters") and is_outgoing(letter) and letter["status"] == "finalized":
+        return True
+    if user["role"] == "department_head" and user["department_id"] == letter["department_id"]:
+        return True
+    # People and departments brought in to collaborate.
+    return collaboration_of(user, letter["id"])["any"]
 
 
 def require_view(user, letter) -> None:
@@ -97,7 +112,8 @@ def require_view(user, letter) -> None:
 
 
 def is_admin(actor) -> bool:
-    return actor["role"] in {"md", "md_pa"}
+    """May act on any letter in any department."""
+    return can(actor, "all_letters")
 
 
 def _audit(connection, letter_id, actor_id, action, old_status, new_status, details=None):
@@ -262,8 +278,8 @@ def _next_our_reference(connection, institute: str, department_id: int) -> str:
 
 def create_letter(actor, sender, subject, received_date, department_id, source_file, content, details=None, storage_path=None):
     """Register a received letter. With storage_path, content was fetched from storage and is not kept in the database."""
-    if actor["role"] != "front_desk":
-        raise Forbidden("Only front desk users can initiate intake")
+    if not can(actor, "register_incoming"):
+        raise Forbidden("You are not allowed to register incoming letters")
     validate_source_file(source_file, len(content))
     extra = _clean_details(details)
     digest = hashlib.sha256(content).hexdigest()
@@ -383,8 +399,8 @@ def get_editable_document(actor, letter_id: int):
 
 
 def route_to_department(actor, letter_id: int, department_id: int):
-    if actor["role"] not in {"front_desk", "md_pa"}:
-        raise Forbidden("Only the front desk or MD PA can route letters to departments")
+    if not can(actor, "route_letters"):
+        raise Forbidden("You are not allowed to route letters to departments")
     connection = connect()
     try:
         letter = _get_letter(connection, letter_id)
@@ -428,10 +444,10 @@ def assign_letter(actor, letter_id: int, assignee_id: int):
     connection = connect()
     try:
         letter = _get_letter(connection, letter_id)
-        if actor["role"] not in {"department_head", "md_pa"}:
-            raise Forbidden("Only a department head or MD PA can assign letters")
-        if actor["role"] == "department_head" and actor["department_id"] != letter["department_id"]:
-            raise Forbidden("Department heads may only assign within their department")
+        if not can(actor, "assign_letters"):
+            raise Forbidden("You are not allowed to assign letters")
+        if not can(actor, "all_letters") and actor["department_id"] != letter["department_id"]:
+            raise Forbidden("You can only assign letters within your own department")
         assignee = connection.execute(
             "SELECT * FROM users WHERE id = ? AND active = 1", (assignee_id,)
         ).fetchone()
@@ -521,8 +537,8 @@ def set_tracking(actor, letter_id: int, payload: dict):
 
 def update_register_details(actor, letter_id: int, changes: dict):
     """Correct the details typed when the letter was registered or started. Locked for everyone else."""
-    if not is_admin(actor):
-        raise Forbidden("Only the MD or MD PA can change registered letter details")
+    if not can(actor, "edit_register_details"):
+        raise Forbidden("You are not allowed to correct registered letter details")
     connection = connect()
     try:
         letter = _get_letter(connection, letter_id)
@@ -669,13 +685,9 @@ def _insert_outgoing(connection, actor, fields, writer_id) -> int:
 def _require_responder(actor, incoming) -> None:
     if is_outgoing(incoming):
         raise BadRequest("Responses are written to received letters")
-    allowed = (
-        is_admin(actor)
-        or incoming["assigned_to"] == actor["id"]
-        or (actor["role"] == "department_head" and actor["department_id"] == incoming["department_id"])
-    )
-    if not allowed:
-        raise Forbidden("Only the assignee, their department head, the MD or the MD PA can respond to this letter")
+    # Anyone who can see the letter and may write outgoing letters can reply to it.
+    if not (can(actor, "create_outgoing") and can_view(actor, incoming)):
+        raise Forbidden("You are not allowed to respond to this letter")
 
 
 def _link_response(connection, actor, incoming, response_id: int) -> None:
@@ -755,8 +767,6 @@ def _choose_writer(connection, actor, department_id, requested):
     if requested in (None, "", "department"):
         return None
     if requested == "self":
-        if actor["role"] == "front_desk":
-            raise Forbidden("The front desk registers the letter; the department writes it")
         return actor["id"]
     writer_id = _int_or_none(requested, "Choose who will write the letter")
     may_choose = is_admin(actor) or (actor["role"] == "department_head" and actor["department_id"] == department_id)
@@ -770,6 +780,8 @@ def _choose_writer(connection, actor, department_id, requested):
 
 def create_outgoing(actor, payload: dict):
     """Register a letter to be sent, optionally in reply to a received letter."""
+    if not can(actor, "create_outgoing"):
+        raise Forbidden("You are not allowed to create outgoing letters")
     recipient = _text(payload.get("recipient"))
     subject = _text(payload.get("subject"))
     if not recipient or not subject:
@@ -817,21 +829,23 @@ def create_outgoing(actor, payload: dict):
 def _require_drafter(actor, letter) -> None:
     if not is_outgoing(letter):
         raise BadRequest("Press Respond to start the reply as an outgoing letter")
-    if actor["role"] == "front_desk" or letter["assigned_to"] != actor["id"]:
+    if letter["assigned_to"] != actor["id"]:
         raise Forbidden("Only the person writing this letter can edit it")
     if letter["status"] not in DRAFTING_STATUSES:
         raise Forbidden("Letters in review or approved cannot be edited")
 
 
 def can_edit(actor, letter) -> bool:
-    """The writer while drafting, the department head while reviewing it, and the MD until approval."""
+    """The writer and any co-writers while drafting, the department head while reviewing it, and the MD until approval."""
     if not is_outgoing(letter) or letter["status"] == "finalized":
         return False
     if actor["role"] == "md":
         return True
     if letter["status"] == "dept_review":
         return actor["role"] == "department_head" and actor["department_id"] == letter["department_id"]
-    return actor["role"] != "front_desk" and letter["assigned_to"] == actor["id"] and letter["status"] in DRAFTING_STATUSES
+    if letter["status"] not in DRAFTING_STATUSES:
+        return False
+    return letter["assigned_to"] == actor["id"] or collaboration_of(actor, letter["id"])["can_edit"]
 
 
 def save_response(actor, letter_id: int, body_html: str | None = None, response_text: str | None = None):
@@ -899,10 +913,10 @@ def _clean_signatory(connection, letter, signatory_id):
     except (TypeError, ValueError):
         raise BadRequest("Choose who signs the letter") from None
     head = connection.execute(
-        "SELECT id FROM users WHERE id = ? AND role = 'department_head' AND active = 1 AND department_id = ?",
+        "SELECT * FROM users WHERE id = ? AND role = 'department_head' AND active = 1 AND department_id = ?",
         (signatory_id, letter["department_id"]),
     ).fetchone()
-    if head is None:
+    if head is None or not can(head, "sign_letters"):
         raise BadRequest("The letter can be signed by the MD or a head of the sending department")
     return signatory_id
 
@@ -929,10 +943,10 @@ def signatories(actor, department_id: int) -> list:
     connection = connect()
     try:
         md = signatory(connection, {"signatory_id": None})
-        heads = connection.execute(
-            "SELECT id, display_name FROM users WHERE role = 'department_head' AND active = 1 AND department_id = ? ORDER BY display_name",
+        heads = [head for head in connection.execute(
+            "SELECT * FROM users WHERE role = 'department_head' AND active = 1 AND department_id = ? ORDER BY display_name",
             (department_id,),
-        ).fetchall()
+        ).fetchall() if can(head, "sign_letters")]
         department = connection.execute("SELECT name FROM departments WHERE id = ?", (department_id,)).fetchone()
         return [{"id": "md", "name": md["name"], "title": "Managing Director"}] + [
             {"id": head["id"], "name": head["display_name"], "title": f"Head, {department['name'] if department else ''}"} for head in heads
@@ -989,8 +1003,8 @@ def submit_for_review(actor, letter_id: int):
             "SELECT id FROM users WHERE role = 'department_head' AND active = 1 AND department_id = ?",
             (letter["department_id"],),
         ).fetchall()
-        # Heads, the MD PA and the MD approve their own drafts; so does a department with no head.
-        needs_head = actor["role"] == "team_member" and bool(heads)
+        # Drafts go to the sending department's head first, unless written by a head, the MD PA or the MD (or there is no head).
+        needs_head = actor["role"] not in {"department_head", "md_pa", "md"} and bool(heads)
         if needs_head:
             _change_status(connection, letter, actor, "dept_review", "submitted_for_review")
             for head in heads:
@@ -1271,12 +1285,12 @@ def _require_dispatcher(actor, letter) -> None:
     if not is_outgoing(letter) or letter["status"] != "finalized":
         raise Forbidden("Only approved outgoing letters can be dispatched")
     allowed = (
-        actor["role"] in {"front_desk", "md", "md_pa"}
+        can(actor, "dispatch_letters")
         or letter["assigned_to"] == actor["id"]
         or (actor["role"] == "department_head" and actor["department_id"] == letter["department_id"])
     )
     if not allowed:
-        raise Forbidden("Only the front desk, the department, the MD or the MD PA can dispatch letters")
+        raise Forbidden("You are not allowed to dispatch this letter")
 
 
 def record_dispatch(actor, letter_id: int, method: str, sent_on: str | None, note: str | None):
@@ -1368,8 +1382,8 @@ def get_delivery_proof(actor, letter_id: int):
 
 
 def set_department_code(actor, department_id: int, code: str):
-    if not is_admin(actor):
-        raise Forbidden("Only the MD or MD PA can administer the system")
+    if not can(actor, "manage_users"):
+        raise Forbidden("You are not allowed to manage departments")
     code = re.sub(r"[^A-Za-z0-9]", "", code or "").upper()
     if not 1 <= len(code) <= 6:
         raise BadRequest("The short code must be 1 to 6 letters or digits")

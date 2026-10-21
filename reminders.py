@@ -59,18 +59,10 @@ def send_deadline_notices(connection, today: date | None = None) -> int:
     today = today or datetime.now(timezone.utc).date()
     sent = 0
     for letter in _due_letters(connection):
-        try:
-            days = (date.fromisoformat(letter["due_date"]) - today).days
-        except ValueError:
+        timing = _timing(letter["due_date"], today)
+        if timing is None:
             continue
-        if days == 2:
-            title, kind = "Deadline in 2 days", "due in 2 days"
-        elif days == 0:
-            title, kind = "Due today", "due today"
-        elif days < 0 and (-days) % 3 == 1:
-            title, kind = "Overdue", f"overdue by {-days} day{'s' if days != -1 else ''}"
-        else:
-            continue
+        days, title, kind = timing
         people = holders(connection, letter)
         if days < 0:
             # Once overdue, the department head is told as well.
@@ -85,7 +77,53 @@ def send_deadline_notices(connection, today: date | None = None) -> int:
                 continue
             _notify(connection, user_id, letter["id"], "deadline", title, f"{reference}: {letter['subject']} is {kind}.")
             sent += 1
+    sent += _collaboration_notices(connection, today)
     connection.commit()
+    return sent
+
+
+def _timing(due_date, today):
+    """(days left, title, phrase) on the days a reminder is due, otherwise None."""
+    try:
+        days = (date.fromisoformat(due_date) - today).days
+    except (TypeError, ValueError):
+        return None
+    if days == 2:
+        return days, "Deadline in 2 days", "due in 2 days"
+    if days == 0:
+        return days, "Due today", "due today"
+    if days < 0 and (-days) % 3 == 1:
+        return days, "Overdue", f"overdue by {-days} day{'s' if days != -1 else ''}"
+    return None
+
+
+def _collaboration_notices(connection, today) -> int:
+    """Reminders to people and departments whose input on a letter is still owed."""
+    sent = 0
+    rows = connection.execute(
+        """
+        SELECT c.user_id, c.department_id, c.due_date, l.id AS letter_id, l.subject, l.reference, l.our_reference
+        FROM letter_collaborators c JOIN letters l ON l.id = c.letter_id
+        WHERE c.status = 'open' AND c.due_date IS NOT NULL AND l.matter_status != 'closed'
+        """
+    ).fetchall()
+    for row in rows:
+        timing = _timing(row["due_date"], today)
+        if timing is None:
+            continue
+        _, title, kind = timing
+        people = {row["user_id"]} if row["user_id"] else _users(connection, "department_head", row["department_id"])
+        reference = row["our_reference"] or row["reference"]
+        for user_id in people:
+            already = connection.execute(
+                "SELECT 1 FROM notifications WHERE user_id = ? AND letter_id = ? AND kind = 'deadline' AND created_at LIKE ?",
+                (user_id, row["letter_id"], f"{today.isoformat()}%"),
+            ).fetchone()
+            if already:
+                continue
+            _notify(connection, user_id, row["letter_id"], "deadline", f"Your input: {title.lower()}",
+                    f"{reference}: your input on {row['subject']} is {kind}.")
+            sent += 1
     return sent
 
 

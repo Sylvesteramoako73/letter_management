@@ -277,9 +277,6 @@ def test_outgoing_line_mirrors_incoming(client):
     """Register an outgoing letter, assign a writer, then department head, MD PA and MD approval."""
     client, department_id, users = client
     login(client, "frontdesk")
-    assert client.post(
-        "/letters/outgoing", json={"recipient": "Lands Commission", "subject": "Site visit", "department_id": department_id, "writer": "self"}
-    ).status_code == 403
     created = client.post(
         "/letters/outgoing",
         json={"recipient": "Lands Commission", "subject": "Site visit", "department_id": department_id,
@@ -349,3 +346,25 @@ def test_autosaves_merge_into_one_version_per_session(client):
     login(client, "md")
     client.put(f"/letters/{letter['id']}/response", json={"body_html": "<p>MD edit</p>"})
     assert len(client.get(f"/letters/{letter['id']}").get_json()["versions"]) == 3
+
+
+def test_front_desk_writes_and_responds_like_everyone_else(client):
+    client, department_id, users = client
+    login(client, "frontdesk")
+    own = client.post(
+        "/letters/outgoing", json={"recipient": "Lands Commission", "subject": "Site visit", "department_id": department_id, "writer": "self"}
+    ).get_json()
+    assert (own["status"], own["assigned_to"]) == ("in_progress", users["frontdesk"])
+    assert client.put(f"/letters/{own['id']}/response", json={"response_text": "Please receive our team."}).status_code == 200
+    # The front desk's draft goes to the sending department's head, like a team member's.
+    assert client.post(f"/letters/{own['id']}/submit").get_json()["status"] == "dept_review"
+
+    # A received letter can be answered straight away, before anyone is assigned.
+    letter = register(client, department_id)
+    reply = client.post(f"/letters/{letter['id']}/respond")
+    assert reply.status_code == 200 and reply.get_json()["assigned_to"] == users["frontdesk"]
+    assert client.get(f"/letters/{letter['id']}").get_json()["letter"]["status"] == "in_progress"
+
+    # Responding needs both: seeing the letter and being allowed to write.
+    login(client, "financeandaccountsmember")
+    assert client.post(f"/letters/{letter['id']}/respond").status_code == 403

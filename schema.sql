@@ -144,3 +144,22 @@ CREATE TABLE IF NOT EXISTS letter_comments (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_comments_letter ON letter_comments(letter_id, id);
+
+CREATE TABLE IF NOT EXISTS letter_collaborators (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    letter_id INTEGER NOT NULL REFERENCES letters(id),
+    user_id INTEGER REFERENCES users(id),
+    department_id INTEGER REFERENCES departments(id),
+    can_edit INTEGER NOT NULL DEFAULT 0 CHECK (can_edit IN (0, 1)),
+    request_note TEXT,
+    due_date TEXT,
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done')),
+    done_note TEXT,
+    done_at TEXT,
+    done_by INTEGER REFERENCES users(id),
+    added_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK ((user_id IS NULL) <> (department_id IS NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_collab_user ON letter_collaborators(letter_id, user_id) WHERE user_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_collab_department ON letter_collaborators(letter_id, department_id) WHERE department_id IS NOT NULL;

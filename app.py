@@ -1,16 +1,20 @@
 import mimetypes
+from urllib.parse import quote
 import os
 import uuid
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, jsonify, redirect, render_template, request, session, send_file
+from flask import Flask, jsonify, redirect, render_template, request, session, send_file, url_for
 from werkzeug.exceptions import BadRequest, Forbidden, HTTPException, Unauthorized
 from werkzeug.security import check_password_hash
 
+import accounts
 import collaboration
+import permissions
 import mailer
+import microsoft_login
 import reminders
 import storage
 import workflow
@@ -39,7 +43,6 @@ from workflow import (
     submit_for_review,
     get_source_document,
     get_editable_document,
-    is_admin,
     route_to_department,
     validate_source_file,
 )
@@ -90,6 +93,7 @@ def create_app(test_config=None):
         app.config.update(test_config)
 
     ensure_database()
+    microsoft_login.init(app)
 
     @app.after_request
     def send_notification_emails(response):
@@ -142,17 +146,20 @@ def create_app(test_config=None):
 
         return wrapped
 
-    def admin_only(view):
-        @wraps(view)
-        def wrapped(*args, **kwargs):
-            user = current_user()
-            if not is_admin(user):
-                from werkzeug.exceptions import Forbidden
+    def requires(capability, message):
+        def decorator(view):
+            @wraps(view)
+            def wrapped(*args, **kwargs):
+                user = current_user()
+                if not permissions.can(user, capability):
+                    raise Forbidden(message)
+                return view(user, *args, **kwargs)
 
-                raise Forbidden("Only the MD or MD PA can administer the system")
-            return view(user, *args, **kwargs)
+            return wrapped
 
-        return wrapped
+        return decorator
+
+    admin_only = requires("manage_users", "You are not allowed to manage users and departments")
 
     @app.get("/")
     def home():
@@ -168,8 +175,44 @@ def create_app(test_config=None):
             return jsonify(status="error", database="schema_not_ready"), 503
         return jsonify(status="ok", database="ok")
 
+    @app.get("/auth/options")
+    def auth_options():
+        return jsonify(microsoft=microsoft_login.configured(), password=microsoft_login.password_sign_in_allowed())
+
+    @app.get("/auth/microsoft")
+    def microsoft_sign_in():
+        if not microsoft_login.configured():
+            return redirect("/?login_error=" + quote("Microsoft sign-in is not set up yet."))
+        callback = microsoft_login.redirect_uri(url_for("microsoft_callback", _external=True))
+        return microsoft_login.oauth.microsoft.authorize_redirect(callback, prompt="select_account")
+
+    @app.get("/auth/microsoft/callback")
+    def microsoft_callback():
+        def failed(message):
+            return redirect("/?login_error=" + quote(message))
+
+        if not microsoft_login.configured():
+            return failed("Microsoft sign-in is not set up yet.")
+        try:
+            token = microsoft_login.oauth.microsoft.authorize_access_token()
+            person = microsoft_login.identity(token.get("userinfo") or {})
+        except PermissionError as error:
+            return failed(str(error))
+        except Exception:
+            app.logger.exception("Microsoft sign-in failed")
+            return failed("Microsoft sign-in did not complete. Please try again.")
+        with connect() as connection:
+            user = microsoft_login.find_user(connection, person)
+        if user is None:
+            return failed(f"{person['email']} is not set up in Letter Desk. Ask the MD to add you with this email address.")
+        session.clear()
+        session["user_id"] = user["id"]
+        return redirect("/#/")
+
     @app.post("/login")
     def login():
+        if not microsoft_login.password_sign_in_allowed():
+            raise Forbidden("Sign in with your Microsoft account")
         payload = request.get_json(silent=True) or {}
         with connect() as connection:
             user = connection.execute(
@@ -203,6 +246,7 @@ def create_app(test_config=None):
             email=user["email"],
             has_signature=bool(user["signature"]),
             email_enabled=mailer.configured(),
+            capabilities=sorted(permissions.capabilities(user)),
         )
 
     @app.patch("/me")
@@ -308,8 +352,8 @@ def create_app(test_config=None):
     @authenticated
     def sign_upload(user):
         """Let the browser upload large scans straight to storage, bypassing Vercel's 4.5 MB limit."""
-        if user["role"] != "front_desk":
-            raise Forbidden("Only front desk users can initiate intake")
+        if not permissions.can(user, "register_incoming"):
+            raise Forbidden("You are not allowed to register incoming letters")
         payload = request.get_json(silent=True) or {}
         filename = Path(str(payload.get("filename", ""))).name
         try:
@@ -379,16 +423,18 @@ def create_app(test_config=None):
         priority = request.args.get("priority", "").strip()
         filters = []
         params = []
-        if user["role"] == "team_member":
-            filters.append("(l.assigned_to = ? OR l.created_by = ?)")
+        if not permissions.can(user, "all_letters"):
+            # Matches workflow.can_view: their own letters, approved letters to dispatch, their department's.
+            scope = ["l.assigned_to = ?", "l.created_by = ?"]
             params.extend([user["id"], user["id"]])
-        elif user["role"] == "front_desk":
-            # Matches workflow.can_view: their own registrations plus approved letters to dispatch.
-            filters.append("(l.created_by = ? OR (l.direction = 'outgoing' AND l.status = 'finalized'))")
-            params.append(user["id"])
-        elif user["role"] == "department_head":
-            filters.append("l.department_id = ?")
-            params.append(user["department_id"])
+            if permissions.can(user, "dispatch_letters"):
+                scope.append("(l.direction = 'outgoing' AND l.status = 'finalized')")
+            if user["role"] == "department_head":
+                scope.append("l.department_id = ?")
+                params.append(user["department_id"])
+            scope.append("EXISTS (SELECT 1 FROM letter_collaborators k WHERE k.letter_id = l.id AND (k.user_id = ? OR k.department_id = ?))")
+            params.extend([user["id"], user["department_id"]])
+            filters.append(f"({' OR '.join(scope)})")
         if search:
             filters.append(
                 "(l.reference LIKE ? OR l.sender LIKE ? OR l.subject LIKE ? OR l.agency_reference LIKE ?"
@@ -418,7 +464,10 @@ def create_app(test_config=None):
                        c.display_name AS created_by_name,
                        p.reference AS in_reply_to_reference,
                        r.id AS response_id, r.our_reference AS response_reference,
-                       r.status AS response_status, r.dispatch_status AS response_dispatch_status
+                       r.status AS response_status, r.dispatch_status AS response_dispatch_status,
+                       EXISTS (SELECT 1 FROM letter_collaborators k WHERE k.letter_id = l.id AND k.status = 'open'
+                               AND (k.user_id = ? OR k.department_id = ?)) AS input_requested,
+                       (SELECT COUNT(*) FROM letter_collaborators k WHERE k.letter_id = l.id AND k.status = 'open') AS open_collaborations
                 FROM letters l
                 JOIN departments d ON d.id = l.department_id
                 LEFT JOIN users a ON a.id = l.assigned_to
@@ -428,9 +477,10 @@ def create_app(test_config=None):
                 {where}
                 ORDER BY l.created_at DESC, l.id DESC
                 """,
-                params,
+                # The placeholders in the column list come before those in WHERE.
+                [user["id"], user["department_id"], *params],
             ).fetchall()
-        return jsonify([dict(letter) for letter in letters])
+        return jsonify([{**dict(letter), "input_requested": bool(letter["input_requested"])} for letter in letters])
 
     @app.get("/letters/<int:letter_id>")
     @authenticated
@@ -479,6 +529,7 @@ def create_app(test_config=None):
             )
             enclosures = collaboration.list_enclosures(connection, letter_id)
             comments = collaboration.list_comments(connection, letter_id)
+            collaborators = collaboration.list_collaborators(connection, letter_id)
             signer = workflow.signatory(connection, letter) if letter["direction"] == "outgoing" else None
         return jsonify(
             letter={
@@ -492,6 +543,8 @@ def create_app(test_config=None):
             in_reply_to_letter=dict(original) if original else None,
             enclosures=enclosures,
             comments=comments,
+            collaborators=collaborators,
+            may_manage_collaborators=collaboration.may_manage_collaborators(user, letter),
             signatory={key: signer[key] for key in ("id", "name", "title")} | {"has_signature": bool(signer["signature"])} if signer else None,
         )
 
@@ -537,7 +590,7 @@ def create_app(test_config=None):
         return jsonify(ok=True)
 
     @app.get("/reports/summary")
-    @admin_only
+    @requires("view_reports", "You are not allowed to see reports")
     def report_summary(user):
         with connect() as connection:
             total = connection.execute("SELECT COUNT(*) AS value FROM letters").fetchone()["value"]
@@ -896,6 +949,30 @@ def create_app(test_config=None):
             return jsonify(error="department_id must be an integer"), 400
         return jsonify(workflow.signatories(user, department_id))
 
+    @app.get("/people")
+    @authenticated
+    def people(user):
+        return jsonify(collaboration.people())
+
+    @app.post("/letters/<int:letter_id>/collaborators")
+    @authenticated
+    def add_collaborator(user, letter_id):
+        collaborator_id = collaboration.add_collaborator(user, letter_id, request.get_json(silent=True) or {})
+        return jsonify(id=collaborator_id), 201
+
+    @app.delete("/letters/<int:letter_id>/collaborators/<int:collaborator_id>")
+    @authenticated
+    def remove_collaborator(user, letter_id, collaborator_id):
+        collaboration.remove_collaborator(user, letter_id, collaborator_id)
+        return jsonify(ok=True)
+
+    @app.post("/letters/<int:letter_id>/collaborators/<int:collaborator_id>/done")
+    @authenticated
+    def collaboration_done(user, letter_id, collaborator_id):
+        payload = request.get_json(silent=True) or {}
+        collaboration.complete_collaboration(user, letter_id, collaborator_id, payload.get("note"))
+        return jsonify(ok=True)
+
     @app.post("/letters/<int:letter_id>/comments")
     @authenticated
     def add_comment(user, letter_id):
@@ -959,12 +1036,10 @@ def create_app(test_config=None):
     @app.get("/team-members")
     @authenticated
     def team_members(user):
-        if user["role"] not in {"department_head", "md", "md_pa"}:
-            from werkzeug.exceptions import Forbidden
-
-            raise Forbidden("Only department heads, the MD, or the MD PA can view team members")
+        if not (permissions.can(user, "assign_letters") or permissions.can(user, "all_letters")):
+            raise Forbidden("You are not allowed to see the team list")
         with connect() as connection:
-            if user["role"] == "department_head":
+            if not permissions.can(user, "all_letters"):
                 rows = connection.execute(
                     """
                     SELECT id, display_name, department_id
@@ -988,16 +1063,27 @@ def create_app(test_config=None):
     @app.get("/users")
     @admin_only
     def users(user):
-        with connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT u.id, u.username, u.display_name, u.role, u.department_id,
-                       u.active, u.email, d.name AS department_name
-                FROM users u LEFT JOIN departments d ON d.id = u.department_id
-                ORDER BY u.display_name
-                """
-            ).fetchall()
-        return jsonify([dict(row) for row in rows])
+        return jsonify(accounts.list_users(user))
+
+    @app.get("/permissions")
+    @admin_only
+    def permission_catalogue(user):
+        return jsonify(accounts.capability_catalogue())
+
+    @app.post("/users")
+    @admin_only
+    def create_user(user):
+        return jsonify(accounts.create_user(user, request.get_json(silent=True) or {})), 201
+
+    @app.patch("/users/<int:user_id>")
+    @admin_only
+    def update_user(user, user_id):
+        return jsonify(accounts.update_user(user, user_id, request.get_json(silent=True) or {}))
+
+    @app.delete("/users/<int:user_id>")
+    @admin_only
+    def delete_user(user, user_id):
+        return jsonify(accounts.delete_user(user, user_id))
 
     @app.post("/departments")
     @admin_only
@@ -1016,67 +1102,6 @@ def create_app(test_config=None):
                 connection.rollback()
                 return jsonify(error="Department already exists or is invalid"), 409
         return jsonify(id=department_id, name=name), 201
-
-    @app.post("/users")
-    @admin_only
-    def create_user(user):
-        from werkzeug.security import generate_password_hash
-
-        payload = request.get_json(silent=True) or {}
-        required = ("username", "password", "display_name", "role")
-        if any(not payload.get(field) for field in required):
-            return jsonify(error="username, password, display_name and role are required"), 400
-        if payload["role"] not in {"front_desk", "department_head", "team_member", "md", "md_pa"}:
-            return jsonify(error="Invalid role"), 400
-        with connect() as connection:
-            try:
-                new_user_id = connection.execute(
-                    """
-                    INSERT INTO users(username, password_hash, display_name, role, department_id, email)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    RETURNING id
-                    """,
-                    (
-                        payload["username"].strip(),
-                        generate_password_hash(payload["password"]),
-                        payload["display_name"].strip(),
-                        payload["role"],
-                        payload.get("department_id"),
-                        str(payload.get("email") or "").strip() or None,
-                    ),
-                ).fetchone()["id"]
-                connection.commit()
-            except IntegrityError:
-                connection.rollback()
-                return jsonify(error="Username already exists or department is invalid"), 409
-        return jsonify(id=new_user_id), 201
-
-    @app.patch("/users/<int:user_id>")
-    @admin_only
-    def update_user(user, user_id):
-        from werkzeug.security import generate_password_hash
-
-        payload = request.get_json(silent=True) or {}
-        changes = {}
-        if "active" in payload:
-            changes["active"] = 1 if payload["active"] else 0
-        if "email" in payload:
-            changes["email"] = str(payload.get("email") or "").strip() or None
-        if payload.get("password"):
-            if len(payload["password"]) < 8:
-                return jsonify(error="The new password must be at least 8 characters"), 400
-            changes["password_hash"] = generate_password_hash(payload["password"])
-        if not changes:
-            return jsonify(error="Nothing to change"), 400
-        with connect() as connection:
-            cursor = connection.execute(
-                f"UPDATE users SET {', '.join(f'{field} = ?' for field in changes)} WHERE id = ?",
-                (*changes.values(), user_id),
-            )
-            connection.commit()
-        if cursor.rowcount == 0:
-            return jsonify(error="User not found"), 404
-        return jsonify(ok=True)
 
     return app
 

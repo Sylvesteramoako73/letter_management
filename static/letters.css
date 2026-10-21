@@ -576,3 +576,48 @@ label.check input{width:auto}
 .signed-by{display:flex;align-items:center;gap:8px;font-size:.76rem;font-weight:650;white-space:nowrap}
 .signed-by select{padding:6px 30px 6px 10px;font-size:.78rem;width:auto}
 @media (max-width:860px){.editor-head-side{justify-content:flex-start}}
+
+/* Users: permission switches and delete */
+.perm-title{margin:18px 0 2px;font-size:.9rem}
+.perm-list{display:grid;gap:6px;margin-top:10px;max-height:340px;overflow:auto;padding-right:4px}
+.perm{display:flex;align-items:flex-start;gap:10px;padding:9px 12px;border:1px solid var(--line);border-radius:9px;font-weight:500;cursor:pointer}
+.perm input{width:auto;margin-top:3px}
+.perm span{display:grid;flex:1}
+.perm strong{font-size:.8rem}
+.perm small{color:var(--muted);font-size:.72rem}
+.perm em{font-style:normal;font-size:.66rem;font-weight:700;color:var(--amber);background:var(--amber-soft);padding:2px 7px;border-radius:10px;align-self:center}
+.perm.changed{border-color:#f0d9a8;background:#fffaf0}
+.perm-chip{margin-left:6px;background:var(--amber-soft);color:var(--amber)}
+.btn.danger{color:var(--red)}
+.btn.danger:hover{background:var(--red-soft)}
+.btn-danger{background:var(--red);color:#fff}
+.btn-danger:hover:not(:disabled){background:#931c2b}
+
+/* Collaboration: people and departments brought into a letter */
+.collab-list{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.collab{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.collab.open{border-color:#f0d9a8;background:#fffcf5}
+.collab .avatar .icon{width:14px;height:14px}
+.collab-main{flex:1;min-width:0;display:grid;gap:3px}
+.collab-main p{margin:0}
+.collab-who{font-size:.82rem}
+.collab-who .chip{margin-left:4px;vertical-align:1px}
+.collab-ask{font-size:.8rem;color:var(--ink-2);font-style:italic}
+.collab-done-note{font-size:.78rem;background:var(--green-soft);color:#0d5536;border-radius:7px;padding:6px 9px;margin-top:2px}
+.collab-done-box{display:grid;gap:8px;margin-top:6px}
+.collab-side{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.collab-add{border-top:1px solid var(--line);padding-top:12px;display:grid;gap:12px}
+.collab-add[open]{display:grid}
+.collab-add summary{cursor:pointer;font-weight:650;font-size:.8rem;color:var(--wine);display:flex;align-items:center;gap:6px}
+.collab-add summary .icon{width:15px;height:15px}
+.co-writer{align-self:end;padding-bottom:10px}
+.also-waiting{margin:6px 0 0;font-size:.76rem;color:var(--amber)}
+@media (max-width:520px){.collab{flex-wrap:wrap}.collab-side{flex-direction:row;align-items:center;width:100%;justify-content:flex-start}}
+
+/* Sign in with Microsoft */
+.microsoft-button{display:flex;align-items:center;justify-content:center;gap:12px;width:100%;padding:13px 16px;border:1px solid #8c8c8c;border-radius:10px;background:#fff;color:#5e5e5e;font-weight:650;font-size:.92rem;text-decoration:none}
+.microsoft-button:hover{background:#f3f3f3}
+.microsoft-button svg{width:20px;height:20px}
+.login-or{display:flex;align-items:center;gap:12px;margin:18px 0;color:var(--muted);font-size:.78rem}
+.login-or:before,.login-or:after{content:"";flex:1;height:1px;background:var(--line)}
+.ms-chip{margin-left:6px;background:#e8f1fb;color:#1b5fae}

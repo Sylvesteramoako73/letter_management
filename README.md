@@ -63,9 +63,19 @@ initial department catalogue includes Administration, Finance and Accounts,
 Sales and Marketing, HR, and Civil; additional departments can be created by
 an administrator.
 
-Production settings are represented in `.env.example`. Set `AUTH_MODE=entra`
-when the intranet identity provider is ready; local mode remains available for
-development.
+Production settings are represented in `.env.example`.
+
+### Sign in with Microsoft
+
+Staff can sign in with their Microsoft 365 (Entra ID) accounts. In the Azure
+portal, register an app (Entra ID > App registrations > New registration,
+single tenant) with the web redirect URI
+`https://<your-domain>/auth/microsoft/callback`, create a client secret, and set
+`ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET` and `APP_BASE_URL`.
+
+A Microsoft account gets in only if a Letter Desk user has the same email
+address; the first sign-in links them. Password sign-in stays available until
+`AUTH_MODE=entra` is set, so set that once everyone has signed in successfully.
 
 ## Database
 

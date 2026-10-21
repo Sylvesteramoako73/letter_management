@@ -183,13 +183,16 @@ def initialize(connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_letters_in_reply_to ON letters(in_reply_to)")
     _allow_department_review(connection)
     for table, added in {
-        "users": {"email": "TEXT", "signature": "BLOB"},
+        "users": {"email": "TEXT", "signature": "BLOB", "permissions": "TEXT", "deleted_at": "TEXT", "microsoft_oid": "TEXT"},
         "notifications": {"emailed_at": "TEXT"},
     }.items():
         existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
         for name, definition in added.items():
             if name not in existing:
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_microsoft_oid ON users(microsoft_oid) WHERE microsoft_oid IS NOT NULL"
+    )
     version_columns = {
         row["name"]
         for row in connection.execute("PRAGMA table_info(letter_versions)").fetchall()
@@ -276,12 +279,11 @@ def seed_demo_data(connection) -> None:
                 (f"{name.lower().replace(' ', '')}member", f"{name} Team Member", "team_member", department["id"]),
             ]
         )
-    existing_users = {
-        row["username"] for row in connection.execute("SELECT username FROM users").fetchall()
-    }
+    # Demo accounts go only into an empty database, so users the MD deletes do not come back.
+    if connection.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+        connection.commit()
+        return
     for username, display_name, role, user_department in users:
-        if username in existing_users:
-            continue
         connection.execute(
             """
             INSERT INTO users

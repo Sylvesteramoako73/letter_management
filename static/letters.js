@@ -8,6 +8,9 @@ const state = { user: null, departments: [], letters: null, notifications: [], t
 // Each navigation bumps state.route; a view that finishes loading after the user has moved on must not draw.
 const stale = (token) => token !== state.route;
 const $ = (selector, root = document) => root.querySelector(selector);
+const can = (capability) => Boolean(state.user && (state.user.capabilities || []).includes(capability));
+// Pages and buttons that need a permission.
+const PAGE_CAPABILITY = { intake: 'register_incoming', compose: 'create_outgoing', reports: 'view_reports', admin: 'manage_users' };
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c]));
 
@@ -206,7 +209,7 @@ async function loadLetters(force = false) {
   return state.letters;
 }
 async function loadTeamMembers() {
-  if (!['department_head', 'md', 'md_pa'].includes(state.user.role)) return [];
+  if (!can('assign_letters') && !can('all_letters')) return [];
   if (!state.teamMembers) state.teamMembers = await api('/team-members');
   return state.teamMembers;
 }
@@ -313,10 +316,15 @@ function roleConfig(role) {
 function renderShell() {
   const user = state.user;
   const config = roleConfig(user.role);
-  const creates = user.role === 'front_desk' ? [CREATE_INCOMING, CREATE_OUTGOING] : [CREATE_OUTGOING];
+  const creates = [CREATE_INCOMING, CREATE_OUTGOING].filter(([, href]) => can(PAGE_CAPABILITY[href.slice(2)]));
+  const nav = [
+    ...config.nav.filter(([path]) => !['reports', 'admin'].includes(path)),
+    ...(can('view_reports') ? [['reports', 'chart', 'Reports']] : []),
+    ...(can('manage_users') ? [['admin', 'settings', 'Users & departments']] : []),
+  ];
   $('#nav').innerHTML = `<div class="side-actions">${creates.map(([label, href, iconName]) =>
     `<a class="nav-item side-action" href="${href}" data-path="${href.slice(2)}">${icon('plus')}<span>${esc(label)}</span>${icon(iconName, 'side-action-kind')}</a>`).join('')}</div>`
-    + config.nav.map(([path, iconName, label]) =>
+    + nav.map(([path, iconName, label]) =>
       `<a class="nav-item" href="#/${path}" data-path="${path}">${icon(iconName)}<span>${esc(label)}</span>${path === '' ? '<span class="nav-count hidden" id="nav-action-count"></span>' : ''}</a>`).join('');
   $('#sidebar-user').innerHTML = `<a href="#/account" class="sidebar-user-link" title="My account"><span class="avatar">${esc(initials(user.display_name))}</span><div><strong>${esc(user.display_name)}</strong><small>${esc(ROLE_NAMES[user.role])}${user.department_name ? ` · ${esc(user.department_name)}` : ''}</small></div>${icon('settings')}</a>`;
   $('#logout').innerHTML = `${icon('logout')}<span>Sign out</span>`;
@@ -328,7 +336,8 @@ function renderShell() {
 function updateNavCounts() {
   const counter = $('#nav-action-count');
   if (!counter || !state.letters) return;
-  const count = state.letters.filter(roleConfig(state.user.role).action).length;
+  const action = roleConfig(state.user.role).action;
+  const count = state.letters.filter((l) => action(l) || l.input_requested).length;
   counter.textContent = count;
   counter.classList.toggle('hidden', count === 0);
 }
@@ -364,11 +373,11 @@ async function router() {
     outgoing: () => renderRegister('outgoing', params),
     letters: () => { location.hash = `#/${params.get('dir') === 'outgoing' ? 'outgoing' : 'incoming'}`; },
     letter: () => renderDetail(Number(parts[1])),
-    intake: role === 'front_desk' ? renderIntake : null,
-    compose: () => renderCompose(params),
+    intake: can('register_incoming') ? renderIntake : null,
+    compose: can('create_outgoing') ? () => renderCompose(params) : null,
     team: role === 'department_head' ? renderTeam : null,
-    reports: ['md', 'md_pa'].includes(role) ? renderReports : null,
-    admin: ['md', 'md_pa'].includes(role) ? renderAdmin : null,
+    reports: can('view_reports') ? renderReports : null,
+    admin: can('manage_users') ? renderAdmin : null,
     verify: renderVerify,
     account: renderAccount,
   };
@@ -389,7 +398,7 @@ function letterRow(letter, { showDept = true } = {}) {
     <span class="row-stripe"></span>
     <span class="row-main"><span class="row-ref">${isOutgoing(letter) ? `${icon('send', 'inline')} OUT · ` : `${icon('inbox', 'inline')} IN · `}${esc(letter.our_reference || letter.reference)}</span><span class="row-title">${esc(letter.subject)}</span>
     <span class="row-sub">${isOutgoing(letter) ? 'To ' : 'From '}${esc(letter.sender)}${showDept ? ` · ${esc(letter.department_name)}` : ''}${esc(who)}</span></span>
-    <span class="row-side">${letter.matter_status === 'closed' ? matterPill(letter) : stagePill(letter)}<span class="row-meta">${priorityChip(letter.priority)}${dueChip(letter)}</span></span></a>`;
+    <span class="row-side">${letter.matter_status === 'closed' ? matterPill(letter) : stagePill(letter)}<span class="row-meta">${letter.input_requested ? `<span class="chip out">${icon('users')}Your input</span>` : letter.open_collaborations ? `<span class="chip">${icon('users')}${letter.open_collaborations} waiting</span>` : ''}${priorityChip(letter.priority)}${dueChip(letter)}</span></span></a>`;
 }
 
 function skeleton() {
@@ -412,7 +421,9 @@ async function renderDashboard() {
       <span class="kpi-top"><span>${esc(kpi.label)}</span><span class="kpi-icon">${icon(kpi.icon)}</span></span>
       <strong>${value}</strong><small>${esc(kpi.hint)}</small></a>`;
   }).join('');
-  const queues = config.queues.map((queue) => {
+  // Everyone, whatever their role, sees letters others have brought them into first.
+  const inputQueue = { title: 'Your input is requested', sub: 'Letters you or your department were brought into. Open one, give your input and mark your part done.', filter: (l) => l.input_requested, hideWhenEmpty: true };
+  const queues = [inputQueue, ...config.queues].map((queue) => {
     let items = letters.filter(queue.filter);
     items = queue.sort === 'recent' ? items.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))) : items.sort(byUrgency);
     if (!items.length && queue.hideWhenEmpty) return '';
@@ -424,7 +435,7 @@ async function renderDashboard() {
   }).join('');
   view.innerHTML = `
     <div class="hero"><span class="hero-icon">${icon(heroIcon)}</span><div><h2>${esc(heroTitle)}</h2><p>${esc(heroText)}</p></div>
-      ${heroCta ? `<div class="hero-actions">${(Array.isArray(heroCta[0]) ? heroCta : [heroCta]).map(([label, href]) => `<a class="btn" href="${href}" style="text-decoration:none">${esc(label)} ${icon('arrow')}</a>`).join('')}</div>` : ''}</div>
+      ${heroCta ? `<div class="hero-actions">${(Array.isArray(heroCta[0]) ? heroCta : [heroCta]).filter(([, href]) => !PAGE_CAPABILITY[href.slice(2)] || can(PAGE_CAPABILITY[href.slice(2)])).map(([label, href]) => `<a class="btn" href="${href}" style="text-decoration:none">${esc(label)} ${icon('arrow')}</a>`).join('')}</div>` : ''}</div>
     <div class="kpis">${kpis}</div>
     ${queues}`;
 }
@@ -463,14 +474,14 @@ async function renderRegister(direction, params) {
   const all = await loadLetters(true);
   if (stale(token)) return;
   const letters = all.filter((l) => registerOf(l) === direction);
-  const wide = ['md', 'md_pa'].includes(state.user.role);
+  const wide = can('all_letters');
   const views = REGISTER_VIEWS[direction];
   const preset = params.get('view');
   const matterOptions = outgoing ? { open: 'Open', closed: 'Closed' } : MATTER;
   view.innerHTML = `<section class="card">
     <div class="register-head"><div><h2>${outgoing ? 'Letters sent' : 'Letters received'}</h2><p>${outgoing ? 'New letters and replies: reference, approval, dispatch and delivery.' : 'Every letter received, who is handling it and how it was answered.'}</p></div>
-      ${outgoing && DRAFTERS.includes(state.user.role) ? `<a class="btn btn-primary btn-sm" href="#/compose" style="text-decoration:none">${icon('plus')}New letter</a>` : ''}
-      ${!outgoing && state.user.role === 'front_desk' ? `<a class="btn btn-primary btn-sm" href="#/intake" style="text-decoration:none">${icon('plus')}Register letter</a>` : ''}</div>
+      ${outgoing && can('create_outgoing') ? `<a class="btn btn-primary btn-sm" href="#/compose" style="text-decoration:none">${icon('plus')}New letter</a>` : ''}
+      ${!outgoing && can('register_incoming') ? `<a class="btn btn-primary btn-sm" href="#/intake" style="text-decoration:none">${icon('plus')}Register letter</a>` : ''}</div>
     <div class="toolbar">
       <label class="search"><span class="sr-only">Search</span>${icon('search')}<input id="f-q" placeholder="Search subject, institution or any reference" value="${esc(params.get('q') || '')}"></label>
       <select id="f-view" aria-label="Show"><option value="">Everything</option>${Object.entries(views).map(([k, [label]]) => `<option value="${k}" ${preset === k ? 'selected' : ''}>${label}</option>`).join('')}</select>
@@ -563,7 +574,8 @@ function canEdit(letter) {
   if (!isOutgoing(letter) || letter.status === 'finalized') return false;
   if (state.user.role === 'md') return true;
   if (letter.status === 'dept_review') return isHeadOf(letter);
-  return state.user.role !== 'front_desk' && letter.assigned_to === state.user.id && drafting(letter);
+  const coWriter = (letter.collaborators || []).some((c) => c.user_id === state.user.id && c.can_edit);
+  return (letter.assigned_to === state.user.id || coWriter) && drafting(letter);
 }
 
 // The company letterhead, as it prints: header with Our Ref under the rule, watermark behind, footer at the end.
@@ -713,6 +725,9 @@ function describeEvent(event, letter) {
     dispatched: ['send', 'blue', `Sent by ${esc(DISPATCH_METHODS[details.method] || details.method)} on ${esc(fmtDate(details.sent_on))} · recorded by ${who}`],
     delivery_recorded: ['check', details.outcome === 'delivered' ? 'green' : 'red', `${details.outcome === 'delivered' ? 'Delivered' : 'Returned undelivered'} on ${esc(fmtDate(details.date))} · recorded by ${who}${details.closed ? ' · correspondence closed' : ''}`],
     tracking_updated: ['check', '', `Tracking updated by ${who}: ${esc(Object.keys(details.changes || {}).map((f) => ({ matter_status: `status ${MATTER[details.to] || details.to}`, status_remarks: 'remarks', action_required: 'action required', due_date: 'deadline' }[f] || f)).join(', '))}`],
+    collaborator_added: ['users', 'blue', `${esc(details.collaborator || '')} brought in by ${who}${details.can_edit ? ' as a co-writer' : ''}`],
+    collaborator_removed: ['x', '', `${esc(details.collaborator || '')} taken off by ${who}`],
+    collaboration_done: ['check', 'green', `${esc(details.collaborator || '')}: input done (marked by ${who})`],
     enclosure_added: ['file', '', `Enclosure “${esc(details.file_name || '')}” added by ${who}`],
     enclosure_removed: ['x', '', `Enclosure “${esc(details.file_name || '')}” removed by ${who}`],
     register_details_edited: ['edit', 'wine', `Details corrected by ${who}: ${esc(Object.keys(details.changes || {}).map((f) => REGISTER_LABELS[f] || f).join(', '))}`],
@@ -743,12 +758,16 @@ function latestFeedback(audit) {
   return { text, by: event.actor_role === 'md' ? 'the MD' : 'your department head' };
 }
 
-const isAdmin = () => ['md', 'md_pa'].includes(state.user.role);
+const isAdmin = () => can('all_letters');
 const isHeadOf = (letter) => state.user.role === 'department_head' && state.user.department_id === letter.department_id;
-const isWriter = (letter) => state.user.role !== 'front_desk' && letter.assigned_to === state.user.id && drafting(letter);
+const isWriter = (letter) => letter.assigned_to === state.user.id && drafting(letter);
+// Drafts go to the department head first unless written by a head, the MD PA or the MD.
+const goesToHead = () => !['department_head', 'md_pa', 'md'].includes(state.user.role);
 const canTrack = (letter) => isAdmin() || letter.assigned_to === state.user.id || isHeadOf(letter);
-const canRespond = (letter) => isAdmin() || letter.assigned_to === state.user.id || isHeadOf(letter);
-const canDispatch = (letter) => ['front_desk', 'md', 'md_pa'].includes(state.user.role) || letter.assigned_to === state.user.id || isHeadOf(letter);
+const canRespond = () => can('create_outgoing');
+const canDispatch = (letter) => can('dispatch_letters') || letter.assigned_to === state.user.id || isHeadOf(letter);
+const mayRoute = () => can('route_letters');
+const mayAssign = (letter) => can('assign_letters') && (can('all_letters') || state.user.department_id === letter.department_id);
 const draftName = (letter) => `${String(letter.our_reference || letter.reference).replaceAll('/', '-')}.docx`;
 const card = (title, sub, body, eyebrow = 'Your action') => `<section class="card action-card"><div class="card-head"><div><p class="eyebrow">${eyebrow}</p><h3>${esc(title)}</h3>${sub ? `<p>${esc(sub)}</p>` : ''}</div></div><div class="action-body">${body}</div></section>`;
 const today = () => todayISO();
@@ -776,14 +795,17 @@ async function incomingPanel(letter, responses) {
   const respondButton = (label = 'Respond: write the reply') => `<button class="btn btn-primary" data-act="respond">${icon('file')}${esc(label)}</button>`;
   const replyLink = (r) => `<a class="reply-link" href="#/letter/${r.id}">${icon('send')}<span><strong class="mono">${esc(r.our_reference)}</strong><small>${esc(stageLabel({ ...r, direction: 'outgoing' }))}</small></span>${icon('arrow')}</a>`;
 
-  if (role === 'front_desk' && s === 'intake') return card('Route this letter', 'Change the department if it was sent to the wrong place.', routeBlock(letter));
-  if (role === 'md_pa' && s === 'intake') return card('Route or assign', 'You can act on behalf of the department.', `${routeBlock(letter)}<hr class="sep">${await assignBlock(letter)}`);
-  if (role === 'department_head' && ['intake', 'assigned'].includes(s) && !open) {
+  if (s === 'intake' && !isHeadOf(letter) && (mayRoute() || mayAssign(letter))) {
+    const blocks = [mayRoute() ? routeBlock(letter) : '', mayAssign(letter) ? await assignBlock(letter) : ''].filter(Boolean);
+    const respond = canRespond(letter) ? `<hr class="sep"><div class="btn-row">${respondButton('Respond to it myself')}</div>` : '';
+    return card(mayAssign(letter) ? 'Route or assign' : 'Route this letter', 'Send it to the right department, choose who handles it, or reply to it yourself.', blocks.join('<hr class="sep">') + respond);
+  }
+  if (isHeadOf(letter) && mayAssign(letter) && ['intake', 'assigned'].includes(s) && !open) {
     return card(s === 'intake' ? 'Assign this letter' : 'Assigned', s === 'intake' ? 'Choose who will prepare the reply.' : `${letter.assignee_name} is to reply. You can reassign it.`,
       `${await assignBlock(letter)}<hr class="sep"><div class="btn-row">${respondButton('Reply yourself')}</div>`);
   }
   if (open) return card('Reply in progress', 'The reply is a separate outgoing letter. Open it to write, approve or track it.', replyLink(open), 'Reply');
-  if (s !== 'finalized' && canRespond(letter) && s !== 'intake') {
+  if (s !== 'finalized' && canRespond(letter)) {
     return card('Respond to this letter', 'Opens the reply on SIGL letterhead, with its reference number, ready to write here in the app.',
       `<div class="btn-row">${respondButton()}</div>${role === 'md' ? mdQuickReply() : ''}`);
   }
@@ -813,11 +835,13 @@ async function outgoingPanel(letter, audit) {
   if (s === 'finalized') return dispatchPanel(letter);
   if (s === 'intake') {
     if (isHeadOf(letter)) return card('Assign a writer', 'Choose who in your department will write this letter, or write it yourself.', `${instructions}${await assignBlock(letter, { selfLabel: 'Write it myself' })}`);
-    if (role === 'md_pa') return card('Route or assign', 'You can act on behalf of the department.', `${instructions}${routeBlock(letter)}<hr class="sep">${await assignBlock(letter)}`);
-    if (role === 'front_desk' && letter.created_by === state.user.id) return card('Route this letter', 'Change the department if it should be written elsewhere.', routeBlock(letter));
+    if (mayRoute() || mayAssign(letter)) {
+      const blocks = [mayRoute() ? routeBlock(letter) : '', mayAssign(letter) ? await assignBlock(letter) : ''].filter(Boolean);
+      return card(mayAssign(letter) ? 'Route or assign' : 'Route this letter', 'Send it to the right department, or choose who writes it.', `${instructions}${blocks.join('<hr class="sep">')}`);
+    }
   }
   if (role !== 'md' && isWriter(letter)) {
-    const next = role === 'team_member' ? 'your department head, then the MD PA and the MD' : 'the MD PA and the MD';
+    const next = goesToHead() ? 'the department head, then the MD PA and the MD' : 'the MD PA and the MD';
     return card(s === 'changes_requested' ? 'Revise the letter' : 'Write the letter', `Write it in the editor on the left. When it is ready, send it for approval by ${next}.`,
       `${feedback}${instructions}<div class="btn-row"><button class="btn btn-primary" data-act="submit">${icon('send')}Send for approval</button></div>`);
   }
@@ -942,8 +966,53 @@ function journeyCard(letter, audit) {
     const took = index ? fmtDuration(parseTs(event.created_at) - parseTs(steps[index - 1].created_at)) : '';
     return `<li class="${index === steps.length - 1 && !done ? 'latest' : ''}"><span class="j-dot"></span><div><strong>${text}</strong><small>${esc(fmtDateTime(event.created_at))}${took ? ` · after ${took}` : ''}</small></div></li>`;
   }).join('');
-  return `<section class="card"><div class="card-head"><div><h3>Tracking</h3><p>${summary}</p></div>${due}</div>
+  const others = waitingOn(letter);
+  const alsoWaiting = others.length ? `<p class="also-waiting">${icon('users', 'inline')} Also waiting for input from ${others.map((c) => `<strong>${esc(collabName(c))}</strong>`).join(', ')}.</p>` : '';
+  return `<section class="card"><div class="card-head"><div><h3>Tracking</h3><p>${summary}</p>${alsoWaiting}</div>${due}</div>
     <ol class="journey">${rows}${done ? '' : `<li class="next"><span class="j-dot"></span><div><strong>Next: ${esc(holder)}</strong><small>Waiting now</small></div></li>`}</ol></section>`;
+}
+
+/* ---------------- Collaboration ---------------- */
+const collabName = (c) => c.user_name || c.department_name;
+const isMyPart = (c) => c.user_id === state.user.id || (c.department_id && c.department_id === state.user.department_id);
+const waitingOn = (letter) => (letter.collaborators || []).filter((c) => c.status === 'open');
+
+async function collaborationCard(letter) {
+  const parts = letter.collaborators || [];
+  const manage = letter.may_manage_collaborators && !(letter.status === 'finalized' && letter.matter_status === 'closed');
+  if (!parts.length && !manage) return '';
+  const entry = (c) => {
+    const mine = isMyPart(c) && c.status === 'open';
+    return `<li class="collab ${c.status}">
+      <span class="avatar sm">${c.department_id ? icon('users') : esc(initials(c.user_name))}</span>
+      <div class="collab-main">
+        <p class="collab-who"><strong>${esc(collabName(c))}</strong>${c.department_id ? ' <span class="chip">Department</span>' : ` <span class="sub">${esc(ROLE_NAMES[c.user_role] || '')}${c.user_department ? ` · ${esc(c.user_department)}` : ''}</span>`}${c.can_edit ? ' <span class="chip out">Co-writer</span>' : ''}</p>
+        ${c.request_note ? `<p class="collab-ask">“${esc(c.request_note)}”</p>` : ''}
+        <p class="sub">Added by ${esc(c.added_by_name)}${c.due_date ? ` · due ${esc(fmtDate(c.due_date))}` : ''}${c.status === 'done' ? ` · done ${esc(timeAgo(c.done_at))} by ${esc(c.done_by_name || '')}` : ''}</p>
+        ${c.done_note ? `<p class="collab-done-note">${esc(c.done_note)}</p>` : ''}
+        ${mine ? `<div class="collab-done-box hidden" id="done-box-${c.id}"><textarea rows="2" placeholder="Your input (optional): it goes into Input & responses"></textarea>
+          <div class="btn-row"><button class="btn btn-success btn-sm" data-act="collab-done" data-collab="${c.id}">${icon('check')}Mark done</button></div></div>` : ''}
+      </div>
+      <div class="collab-side">${c.status === 'done' ? '<span class="pill dispatch-delivered">Done</span>' : '<span class="pill dispatch-pending">Waiting</span>'}
+        ${mine ? `<button class="btn btn-secondary btn-sm" data-act="collab-done-toggle" data-collab="${c.id}">My part is done</button>` : ''}
+        ${manage ? `<button class="btn btn-ghost btn-sm" data-act="collab-remove" data-collab="${c.id}" data-name="${esc(collabName(c))}" title="Remove">${icon('x')}</button>` : ''}</div></li>`;
+  };
+  let form = '';
+  if (manage) {
+    const people = await api('/people').catch(() => []);
+    const taken = new Set(parts.map((c) => (c.user_id ? `u${c.user_id}` : `d${c.department_id}`)));
+    const personOptions = people.filter((p) => !taken.has(`u${p.id}`)).map((p) => `<option value="u${p.id}">${esc(p.display_name)} · ${esc(ROLE_NAMES[p.role] || '')}${p.department_name ? `, ${esc(p.department_name)}` : ''}</option>`).join('');
+    const departmentOptions = state.departments.filter((d) => !taken.has(`d${d.id}`)).map((d) => `<option value="d${d.id}">${esc(d.name)} (whole department)</option>`).join('');
+    form = `<details class="collab-add" ${parts.length ? '' : 'open'}><summary>${icon('plus')}Bring someone in</summary>
+      <label>Person or department<select id="collab-who"><option value="">Choose…</option><optgroup label="Departments">${departmentOptions}</optgroup><optgroup label="People">${personOptions}</optgroup></select></label>
+      <label><span>What do you need from them? <span class="hint">(optional)</span></span><textarea id="collab-note" rows="2" placeholder="e.g. Confirm the amount owed before we reply."></textarea></label>
+      <div class="form-pair"><label><span>Needed by <span class="hint">(optional)</span></span><input id="collab-due" type="date" min="${todayISO()}"></label>
+        ${isOutgoing(letter) ? '<label class="check co-writer"><input id="collab-edit" type="checkbox"> Can also edit the letter</label>' : '<span></span>'}</div>
+      <div class="btn-row"><button class="btn btn-primary" data-act="collab-add">${icon('users')}Add to this letter</button></div></details>`;
+  }
+  const open = waitingOn(letter).length;
+  return `<section class="card" id="collaboration"><div class="card-head"><div><h3>Collaboration</h3><p>${parts.length ? `${open ? `Waiting on ${open} of ${parts.length}.` : 'Everyone has given their input.'}` : 'Bring in other people or departments whose attention this letter needs.'}</p></div></div>
+    <div class="action-body">${parts.length ? `<ul class="collab-list">${parts.map(entry).join('')}</ul>` : ''}${form}</div></section>`;
 }
 
 /* ---------------- Enclosures ---------------- */
@@ -995,8 +1064,8 @@ function registerCard(letter) {
   const fact = (label, value) => `<dt>${esc(label)}</dt><dd>${value}</dd>`;
   const outgoing = isOutgoing(letter);
   const lines = (text) => (text ? text.split(/\n+/).map((p) => esc(p.trim())).filter(Boolean).join('<br>') : '—');
-  return `<section class="card"><div class="card-head"><div><h3>${outgoing ? 'Letter details' : 'Registered details'}</h3><p>${icon('lock', 'inline')} ${outgoing ? 'Set when the letter was started' : 'Locked after registration'}${isAdmin() ? '' : '. Only the MD or MD PA can correct them'}.</p></div>
-    ${isAdmin() ? `<button class="btn btn-ghost btn-sm" data-act="edit-details">${icon('edit')}Edit</button>` : ''}</div><dl class="facts">
+  return `<section class="card"><div class="card-head"><div><h3>${outgoing ? 'Letter details' : 'Registered details'}</h3><p>${icon('lock', 'inline')} ${outgoing ? 'Set when the letter was started' : 'Locked after registration'}${can('edit_register_details') ? '' : '. Only people allowed to correct details can change them'}.</p></div>
+    ${can('edit_register_details') ? `<button class="btn btn-ghost btn-sm" data-act="edit-details">${icon('edit')}Edit</button>` : ''}</div><dl class="facts">
     ${outgoing ? fact('Our reference', `<span class="mono">${esc(letter.our_reference)}</span>`) : fact('Register number', `<span class="mono">${esc(letter.reference)}</span>`)}
     ${fact(outgoing ? 'Created' : 'Date registered', esc(fmtDateTime(letter.created_at)))}
     ${fact('Subject', esc(letter.subject))}
@@ -1029,11 +1098,14 @@ async function renderDetail(id) {
   const view = $('#view');
   view.innerHTML = `<div class="skeleton" style="height:120px;margin-bottom:20px"></div><div class="grid-2"><div class="skeleton" style="height:560px"></div><div class="skeleton" style="height:360px"></div></div>`;
   const token = state.route;
-  const { letter, audit, responses, in_reply_to_letter: original, enclosures = [], comments = [], signatory = null } = await api(`/letters/${id}`);
+  const { letter, audit, responses, in_reply_to_letter: original, enclosures = [], comments = [], signatory = null, collaborators = [], may_manage_collaborators: mayManage = false } = await api(`/letters/${id}`);
+  letter.collaborators = collaborators;
+  letter.may_manage_collaborators = mayManage;
   letter.signatory = signatory;
   letter.enclosure_list = enclosures;
   const outgoing = isOutgoing(letter);
   const panel = outgoing ? await outgoingPanel(letter, audit) : await incomingPanel(letter, responses);
+  const collaboration = await collaborationCard(letter);
   if (stale(token)) return;
   setPage(outgoing ? 'Outgoing letter' : 'Received letter', letter.our_reference || letter.reference, registerOf(letter));
   const fact = (label, value) => `<dt>${esc(label)}</dt><dd>${value}</dd>`;
@@ -1058,6 +1130,7 @@ async function renderDetail(id) {
       <div class="stack" id="action-slot">
         ${panel}
         ${journeyCard(letter, audit)}
+        ${collaboration}
         ${linksCard(letter, responses, original)}
         ${enclosuresCard(letter, enclosures)}
         ${trackingCard(letter)}
@@ -1177,6 +1250,27 @@ function bindActions(letter) {
     const button = event.target.closest('[data-act]');
     if (!button) return;
     const act = button.dataset.act;
+    if (act === 'collab-add') {
+      const choice = $('#collab-who').value;
+      if (!choice) { toast('Choose a person or a department.', 'error'); $('#collab-who').focus(); return; }
+      const payload = { request_note: $('#collab-note').value, due_date: $('#collab-due').value, can_edit: Boolean($('#collab-edit')?.checked) };
+      payload[choice[0] === 'u' ? 'user_id' : 'department_id'] = Number(choice.slice(1));
+      return run(button, 'POST', `/letters/${letter.id}/collaborators`, payload, `${$('#collab-who').selectedOptions[0].textContent.split(' · ')[0].replace(' (whole department)', '')} has been brought in and notified.`);
+    }
+    if (act === 'collab-remove') {
+      if (!(await modal({ title: `Take ${button.dataset.name} off this letter?`, body: 'They will no longer see it unless they handle it anyway.', confirmText: 'Remove' }))) return;
+      return run(button, 'DELETE', `/letters/${letter.id}/collaborators/${button.dataset.collab}`, undefined, `${button.dataset.name} removed.`);
+    }
+    if (act === 'collab-done-toggle') {
+      const box = $(`#done-box-${button.dataset.collab}`);
+      box.classList.toggle('hidden');
+      if (!box.classList.contains('hidden')) $('textarea', box).focus();
+      return;
+    }
+    if (act === 'collab-done') {
+      const note = $(`#done-box-${button.dataset.collab} textarea`).value;
+      return run(button, 'POST', `/letters/${letter.id}/collaborators/${button.dataset.collab}/done`, { note }, 'Marked done. They have been told.');
+    }
     if (act === 'enc-remove') {
       if (!(await modal({ title: 'Remove this enclosure?', body: 'It will no longer go with the letter.', confirmText: 'Remove' }))) return;
       return run(button, 'DELETE', `/letters/${letter.id}/enclosures/${button.dataset.enc}`, undefined, 'Enclosure removed.');
@@ -1243,7 +1337,7 @@ function bindActions(letter) {
     }
     if (act === 'route-md') return run(button, 'POST', `/letters/${letter.id}/route-to-md`, {}, 'Sent to the MD for approval.');
     if (act === 'submit') {
-      const ok = await modal({ title: 'Send for approval?', body: `The letter goes to ${state.user.role === 'team_member' ? 'your department head, then ' : ''}the MD PA and the MD. You can’t edit it unless it is returned.`, confirmText: 'Send' });
+      const ok = await modal({ title: 'Send for approval?', body: `The letter goes to ${goesToHead() ? 'the department head, then ' : ''}the MD PA and the MD. You can’t edit it unless it is returned.`, confirmText: 'Send' });
       if (ok) return run(button, 'POST', `/letters/${letter.id}/submit`, {}, 'Sent for approval.');
       return;
     }
@@ -1412,7 +1506,7 @@ async function renderCompose(params) {
   const role = state.user.role;
   // The front desk, MD and MD PA choose the sending department; department staff send from their own.
   const choosesDept = ['front_desk', 'md', 'md_pa'].includes(role);
-  const answerable = letters.filter((l) => !isOutgoing(l) && l.status !== 'intake' && canRespond(l))
+  const answerable = letters.filter((l) => !isOutgoing(l) && l.status !== 'finalized' && canRespond(l))
     .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
   const deptOptions = state.departments.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
   $('#view').innerHTML = `<div class="grid-2">
@@ -1450,7 +1544,10 @@ async function renderCompose(params) {
   const drawWriter = () => {
     const slot = $('#writer-slot');
     if (role === 'team_member') { slot.innerHTML = 'Writer<input value="You" disabled>'; return; }
-    if (role === 'front_desk') { slot.innerHTML = 'Writer<input value="The department head assigns one" disabled>'; return; }
+    if (role === 'front_desk') {
+      slot.innerHTML = 'Writer<select name="writer"><option value="department">The department head assigns one</option><option value="self">Me</option></select>';
+      return;
+    }
     const team = members.filter((m) => m.department_id === deptId());
     slot.innerHTML = `Writer<select name="writer">
       <option value="department">${role === 'department_head' ? 'Decide later' : 'The department head assigns one'}</option>
@@ -1576,21 +1673,81 @@ async function renderReports() {
       <div class="rows">${overdue.length ? overdue.map((l) => letterRow(l)).join('') : empty('Nothing overdue', 'Every open letter is within its deadline.', 'check')}</div></section>`;
 }
 
-/* ---------------- Admin (MD, MD PA) ---------------- */
+/* ---------------- Admin (users and departments) ---------------- */
+function userModal(user, catalogue) {
+  const isMD = state.user.role === 'md';
+  const self = user.id === state.user.id;
+  const deptOptions = `<option value="">None</option>${state.departments.map((d) => `<option value="${d.id}" ${d.id === user.department_id ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}`;
+  const defaults = (role) => new Set(catalogue.role_defaults[role] || []);
+  return new Promise((resolve) => {
+    const root = $('#modal-root');
+    root.innerHTML = `<div class="modal-backdrop"><form class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-body"><h3 id="modal-title">${esc(user.display_name)}</h3><p class="mono">${esc(user.username)}</p>
+      <div class="form-grid">
+        <label>Full name<input name="display_name" value="${esc(user.display_name)}" required></label>
+        <label>Email<input name="email" type="email" value="${esc(user.email || '')}"></label>
+        <label>Role<select name="role" ${isMD && !self ? '' : 'disabled'}>${Object.entries(ROLE_NAMES).map(([k, v]) => `<option value="${k}" ${k === user.role ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+        <label>Department<select name="department_id">${deptOptions}</select></label>
+        <label class="check wide"><input type="checkbox" name="active" ${user.active ? 'checked' : ''} ${self ? 'disabled' : ''}> Account is active (can sign in)</label>
+      </div>
+      <h4 class="perm-title">What ${esc(user.display_name.split(' ')[0])} can do</h4>
+      <p class="hint-text">${isMD ? 'Ticked items are allowed. “Changed” marks a difference from the usual for their role.' : 'Only the MD can change these.'} Approval steps follow the person’s role.</p>
+      <div class="perm-list" id="perm-list"></div></div>
+      <div class="modal-foot"><button type="button" class="btn btn-secondary" data-close>Cancel</button><button class="btn btn-primary" data-ok>Save changes</button></div></form></div>`;
+    const form = $('form', root);
+    // Ticked state of each permission: what they have now; a new role brings its defaults, except deliberate changes.
+    let allowed = Object.fromEntries(catalogue.capabilities.map((c) => [c.key, user.capabilities.includes(c.key)]));
+    const drawPermissions = () => {
+      const usual = defaults(form.elements.role.value);
+      $('#perm-list', root).innerHTML = catalogue.capabilities.map((c) => {
+        const on = allowed[c.key];
+        const changed = on !== usual.has(c.key);
+        return `<label class="perm ${changed ? 'changed' : ''}"><input type="checkbox" name="${c.key}" ${on ? 'checked' : ''} ${isMD ? '' : 'disabled'}>
+          <span><strong>${esc(c.label)}</strong><small>${esc(c.description)}</small></span>${changed ? '<em>Changed</em>' : ''}</label>`;
+      }).join('');
+    };
+    drawPermissions();
+    form.elements.role.addEventListener('change', () => {
+      const usual = defaults(form.elements.role.value);
+      allowed = Object.fromEntries(catalogue.capabilities.map((c) => [c.key, c.key in user.overrides ? user.overrides[c.key] : usual.has(c.key)]));
+      drawPermissions();
+    });
+    $('#perm-list', root).addEventListener('change', (event) => { allowed[event.target.name] = event.target.checked; drawPermissions(); });
+    const close = (value) => { root.innerHTML = ''; document.removeEventListener('keydown', onKey); resolve(value); };
+    const onKey = (event) => { if (event.key === 'Escape') close(null); };
+    document.addEventListener('keydown', onKey);
+    $('[data-close]', root).onclick = () => close(null);
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      const changes = { display_name: form.elements.display_name.value, email: form.elements.email.value, department_id: form.elements.department_id.value || null };
+      if (!self) changes.active = form.elements.active.checked;
+      if (isMD && !self && form.elements.role.value !== user.role) changes.role = form.elements.role.value;
+      if (isMD) changes.permissions = allowed;
+      close(changes);
+    };
+    form.elements.display_name.focus();
+  });
+}
+
 async function renderAdmin() {
   setPage('Administration', 'Users & departments', 'admin');
   const view = $('#view');
   view.innerHTML = skeleton();
   const token = state.route;
-  const [users, letters] = await Promise.all([api('/users'), loadLetters()]);
+  const [users, letters, catalogue] = await Promise.all([api('/users'), loadLetters(), api('/permissions')]);
   if (stale(token)) return;
+  const isMD = state.user.role === 'md';
   const deptOptions = state.departments.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
+  const extras = (u) => {
+    const changed = Object.keys(u.overrides || {}).length;
+    return changed ? `<span class="chip perm-chip" title="Permissions differ from the usual for this role">${changed} custom permission${changed > 1 ? 's' : ''}</span>` : '';
+  };
   view.innerHTML = `<div class="grid-2">
-    <section class="card"><div class="card-head"><div><h3>Users</h3><p>${users.filter((u) => u.active).length} active of ${users.length}</p></div><button class="btn btn-primary btn-sm" id="toggle-user-form">${icon('plus')}Add user</button></div>
+    <section class="card"><div class="card-head"><div><h3>Users</h3><p>${users.filter((u) => u.active).length} active of ${users.length}. ${isMD ? 'Open a user to change their role and what they can do.' : ''}</p></div><button class="btn btn-primary btn-sm" id="toggle-user-form">${icon('plus')}Add user</button></div>
       <form class="inline-form hidden" id="user-form" autocomplete="off">
         <label>Full name *<input name="display_name" required placeholder="e.g. Ama Owusu"></label>
         <label>Username *<input name="username" required placeholder="e.g. aowusu"></label>
-        <label>Role *<select name="role" required>${Object.entries(ROLE_NAMES).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></label>
+        <label>Role *<select name="role" required>${Object.entries(ROLE_NAMES).filter(([k]) => isMD || k !== 'md').map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></label>
         <label>Department<select name="department_id"><option value="">None</option>${deptOptions}</select></label>
         <label class="wide"><span>Email <span class="hint">(for notifications)</span></span><input name="email" type="email" placeholder="e.g. a.owusu@swamiindiaghanaltd.com"></label>
         <label class="wide">Temporary password *<span style="display:flex;gap:8px"><input name="password" required minlength="8"><button type="button" class="btn btn-secondary" id="gen-pass">Generate</button></span></label>
@@ -1598,9 +1755,13 @@ async function renderAdmin() {
       </form>
       <div class="table-wrap"><table><thead><tr><th>Name</th><th>Role</th><th class="hide-sm">Department</th><th>Status</th><th></th></tr></thead><tbody>
         ${users.map((u) => `<tr><td><span class="title">${esc(u.display_name)}</span><span class="sub mono">${esc(u.username)}</span>${u.email ? `<span class="sub">${esc(u.email)}</span>` : ''}</td>
-          <td><span class="role-tag">${esc(ROLE_NAMES[u.role] || u.role)}</span></td><td class="hide-sm">${esc(u.department_name || '—')}</td>
+          <td><span class="role-tag">${esc(ROLE_NAMES[u.role] || u.role)}</span>${extras(u)}${u.microsoft_linked ? '<span class="chip ms-chip" title="Signs in with Microsoft">Microsoft</span>' : ''}</td><td class="hide-sm">${esc(u.department_name || '—')}</td>
           <td><span class="status-dot ${u.active ? '' : 'off'}">${u.active ? 'Active' : 'Inactive'}</span></td>
-          <td style="text-align:right">${u.id === state.user.id ? '<span class="sub">You</span>' : `<div class="row-actions"><button class="btn btn-ghost btn-sm" data-reset="${u.id}" data-name="${esc(u.display_name)}">Reset password</button><button class="btn btn-ghost btn-sm" data-user="${u.id}" data-active="${u.active ? 0 : 1}">${u.active ? 'Deactivate' : 'Activate'}</button></div>`}</td></tr>`).join('')}
+          <td style="text-align:right"><div class="row-actions">
+            ${(u.role === 'md' && !isMD) ? '' : `<button class="btn btn-ghost btn-sm" data-edit="${u.id}">${icon('edit')}Edit</button>`}
+            ${u.id === state.user.id || (u.role === 'md' && !isMD) ? '' : `<button class="btn btn-ghost btn-sm" data-reset="${u.id}" data-name="${esc(u.display_name)}">Reset password</button>`}
+            ${isMD && u.id !== state.user.id ? `<button class="btn btn-ghost btn-sm danger" data-delete="${u.id}" data-name="${esc(u.display_name)}">${icon('x')}Delete</button>` : ''}
+            ${u.id === state.user.id ? '<span class="sub">You</span>' : ''}</div></td></tr>`).join('')}
       </tbody></table></div></section>
     <section class="card"><div class="card-head"><div><h3>Departments</h3><p>${state.departments.length} departments · the short code goes in reference numbers, e.g. SIGL/MOF/<b>AC</b>/0001</p></div></div>
       <ul class="dept-list">${state.departments.map((d) => {
@@ -1635,6 +1796,19 @@ async function renderAdmin() {
     });
   });
   $('.grid-2', view).addEventListener('click', async (event) => {
+    const edit = event.target.closest('[data-edit]');
+    if (edit) {
+      const user = users.find((u) => u.id === Number(edit.dataset.edit));
+      const changes = await userModal(user, catalogue);
+      if (!changes) return;
+      try {
+        await api(`/users/${user.id}`, { method: 'PATCH', json: changes });
+        state.teamMembers = null;
+        toast(`${changes.display_name || user.display_name} updated.`);
+        await renderAdmin();
+      } catch (error) { toast(error.message, 'error'); }
+      return;
+    }
     const reset = event.target.closest('[data-reset]');
     if (reset) {
       const password = await modal({ title: `New password for ${reset.dataset.name}`, body: 'At least 8 characters. Share it with them privately; they can change it under My account.', confirmText: 'Set password', input: { placeholder: 'New password', required: true } });
@@ -1645,13 +1819,19 @@ async function renderAdmin() {
       });
       return;
     }
-    const button = event.target.closest('[data-user]');
-    if (!button) return;
-    const activate = button.dataset.active === '1';
-    if (!activate && !(await modal({ title: 'Deactivate this user?', body: 'They will no longer be able to sign in. Their history is kept.', confirmText: 'Deactivate', confirmClass: 'btn-primary' }))) return;
-    await busy(button, async () => {
-      try { await api(`/users/${button.dataset.user}`, { method: 'PATCH', json: { active: activate } }); state.teamMembers = null; toast(activate ? 'User activated.' : 'User deactivated.'); await renderAdmin(); } catch (error) { toast(error.message, 'error'); }
-    });
+    const remove = event.target.closest('[data-delete]');
+    if (remove) {
+      const ok = await modal({ title: `Delete ${remove.dataset.name}?`, body: 'They will no longer be able to sign in and will disappear from the user list. Letters they worked on keep their name in the history. This cannot be undone.', confirmText: 'Delete user', confirmClass: 'btn-danger' });
+      if (!ok) return;
+      await busy(remove, async () => {
+        try {
+          const result = await api(`/users/${remove.dataset.delete}`, { method: 'DELETE' });
+          state.teamMembers = null;
+          toast(result.kept_on_history ? `${remove.dataset.name} deleted. Their name stays on past letters.` : `${remove.dataset.name} deleted.`);
+          await renderAdmin();
+        } catch (error) { toast(error.message, 'error'); }
+      });
+    }
   });
   $$('.code-form', view).forEach((codeForm) => codeForm.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -1674,7 +1854,6 @@ async function renderAdmin() {
     });
   });
 }
-
 
 /* ---------------- Check a letter ---------------- */
 function renderVerify() {
@@ -1730,7 +1909,7 @@ async function renderAccount() {
       <form class="action-body" id="password-form" autocomplete="off"><label>Current password<input name="current" type="password" autocomplete="current-password" required></label>
         <label>New password<input name="new" type="password" autocomplete="new-password" minlength="8" required></label>
         <div class="btn-row"><button class="btn btn-secondary">${icon('lock')}Change password</button></div></form></section>
-    ${['md', 'department_head'].includes(me.role) ? `<section class="card"><div class="card-head"><div><h3>My signature</h3><p>Printed on every letter you are chosen to sign. A photo or scan of your signature on white paper works; the white is made transparent.</p></div></div>
+    ${(me.capabilities || []).includes('sign_letters') ? `<section class="card"><div class="card-head"><div><h3>My signature</h3><p>Printed on every letter you are chosen to sign. A photo or scan of your signature on white paper works; the white is made transparent.</p></div></div>
       <div class="action-body">${me.has_signature ? `<div class="signature-preview"><img src="/me/signature?${Date.now()}" alt="Your signature"></div>` : '<p class="hint-text">No signature yet. Letters are still digitally signed, with a blank signing space.</p>'}
         <div class="btn-row"><label class="btn btn-secondary file-btn">${icon('upload')}${me.has_signature ? 'Replace signature' : 'Upload signature'}<input type="file" id="signature-input" accept=".png,.jpg,.jpeg" hidden></label>
           ${me.has_signature ? `<button class="btn btn-ghost" id="signature-remove">${icon('x')}Remove</button>` : ''}</div></div></section>` : ''}
@@ -1825,7 +2004,18 @@ function showLogin() {
   $('#workspace').classList.add('hidden');
   $('#login-card').classList.remove('hidden');
   document.title = 'SIGL Letter Desk';
-  setTimeout(() => $('#login-form input[name="username"]').focus(), 0);
+  // A failed Microsoft sign-in comes back with the reason in the address.
+  const params = new URLSearchParams(location.search);
+  if (params.get('login_error')) {
+    $('#login-message').textContent = params.get('login_error');
+    history.replaceState(null, '', location.pathname + location.hash);
+  }
+  fetch('/auth/options', { credentials: 'same-origin' }).then((r) => r.json()).then((options) => {
+    $('#microsoft-sign-in').classList.toggle('hidden', !options.microsoft);
+    $('#login-or').classList.toggle('hidden', !options.password);
+    $('#login-form').classList.toggle('hidden', !options.password);
+    if (options.password) $('#login-form input[name="username"]').focus();
+  }).catch(() => $('#login-form input[name="username"]').focus());
 }
 function sessionEnded() {
   showLogin();
