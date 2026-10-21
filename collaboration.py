@@ -1,7 +1,6 @@
 """Collaboration on a letter (people and departments brought in, input and responses), enclosures,
 signatures and verification."""
 
-from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
@@ -10,7 +9,7 @@ from werkzeug.exceptions import BadRequest, Forbidden, NotFound
 import signing
 from db import IntegrityError, connect
 from permissions import can
-from workflow import _audit, _get_letter, _notify, can_edit, is_outgoing, require_view, safe_filename
+from workflow import _audit, _get_letter, _notify, can_edit, handles, is_outgoing, require_view, safe_filename
 
 ENCLOSURE_EXTENSIONS = (".pdf", ".png", ".jpg", ".jpeg", ".doc", ".docx", ".xls", ".xlsx")
 MAX_ENCLOSURE_BYTES = 4 * 1024 * 1024  # Vercel rejects request bodies over 4.5 MB
@@ -170,10 +169,11 @@ def _collaborating_people(connection, letter_id: int) -> set:
 
 
 def may_manage_collaborators(actor, letter) -> bool:
-    """Whoever handles the letter, the head of its department, and those who work on every letter."""
+    """Whoever handles the letter (collaborators included), its starter and department head, and those who work on every letter."""
     return (
         can(actor, "all_letters")
-        or actor["id"] in {letter["assigned_to"], letter["created_by"]}
+        or actor["id"] == letter["created_by"]
+        or handles(actor, letter)
         or (actor["role"] == "department_head" and actor["department_id"] == letter["department_id"])
     )
 
@@ -181,15 +181,14 @@ def may_manage_collaborators(actor, letter) -> bool:
 def list_collaborators(connection, letter_id: int) -> list:
     rows = connection.execute(
         """
-        SELECT c.id, c.user_id, c.department_id, c.can_edit, c.request_note, c.due_date, c.status, c.done_note, c.done_at, c.created_at,
+        SELECT c.id, c.user_id, c.department_id, c.request_note, c.created_at,
                u.display_name AS user_name, u.role AS user_role, ud.name AS user_department,
-               d.name AS department_name, a.display_name AS added_by_name, f.display_name AS done_by_name
+               d.name AS department_name, a.display_name AS added_by_name
         FROM letter_collaborators c
         LEFT JOIN users u ON u.id = c.user_id
         LEFT JOIN departments ud ON ud.id = u.department_id
         LEFT JOIN departments d ON d.id = c.department_id
         JOIN users a ON a.id = c.added_by
-        LEFT JOIN users f ON f.id = c.done_by
         WHERE c.letter_id = ? ORDER BY c.id
         """,
         (letter_id,),
@@ -197,58 +196,74 @@ def list_collaborators(connection, letter_id: int) -> list:
     return [dict(row) for row in rows]
 
 
-def add_collaborator(actor, letter_id: int, payload: dict) -> int:
-    user_id = payload.get("user_id") or None
-    department_id = payload.get("department_id") or None
-    if bool(user_id) == bool(department_id):
-        raise BadRequest("Choose one person or one department")
+def _ids(payload, plural, single):
+    values = payload.get(plural)
+    if values is None:
+        values = [payload[single]] if payload.get(single) else []
+    try:
+        return list(dict.fromkeys(int(value) for value in values if value not in (None, "")))
+    except (TypeError, ValueError):
+        raise BadRequest("Choose people or departments from the list") from None
+
+
+def add_collaborators(actor, letter_id: int, payload: dict) -> dict:
+    """Bring people and/or whole departments into a letter in one go. They all get the same access."""
+    user_ids = _ids(payload, "user_ids", "user_id")
+    department_ids = _ids(payload, "department_ids", "department_id")
+    if not user_ids and not department_ids:
+        raise BadRequest("Choose at least one person or department")
     note = (payload.get("request_note") or "").strip() or None
     if note and len(note) > MAX_COMMENT_CHARS:
-        raise BadRequest(f"Keep the request under {MAX_COMMENT_CHARS} characters")
-    due_date = _clean_due(payload.get("due_date"))
+        raise BadRequest(f"Keep the message under {MAX_COMMENT_CHARS} characters")
     connection = connect()
     try:
         letter = _get_letter(connection, letter_id)
         if not may_manage_collaborators(actor, letter):
-            raise Forbidden("Only those handling the letter can bring others in")
+            raise Forbidden("Only those working on the letter can add collaborators")
         if letter["status"] == "finalized" and letter["matter_status"] == "closed":
             raise Forbidden("This letter is closed")
-        can_edit_letter = 1 if payload.get("can_edit") and user_id and is_outgoing(letter) else 0
-        if user_id:
+        existing = connection.execute(
+            "SELECT user_id, department_id FROM letter_collaborators WHERE letter_id = ?", (letter_id,)
+        ).fetchall()
+        taken_users = {row["user_id"] for row in existing}
+        taken_departments = {row["department_id"] for row in existing}
+        chosen = []  # (user_id, department_id, label, people to notify)
+        for user_id in user_ids:
             person = connection.execute(
-                "SELECT id, display_name FROM users WHERE id = ? AND active = 1 AND deleted_at IS NULL", (int(user_id),)
+                "SELECT id, display_name FROM users WHERE id = ? AND active = 1 AND deleted_at IS NULL", (user_id,)
             ).fetchone()
             if person is None:
-                raise BadRequest("Choose an active person")
-            label, recipients = person["display_name"], {person["id"]}
-        else:
-            department = connection.execute("SELECT id, name FROM departments WHERE id = ?", (int(department_id),)).fetchone()
+                raise BadRequest("One of the people chosen is not an active user")
+            if user_id not in taken_users:
+                chosen.append((user_id, None, person["display_name"], {user_id}))
+        for department_id in department_ids:
+            department = connection.execute("SELECT id, name FROM departments WHERE id = ?", (department_id,)).fetchone()
             if department is None:
-                raise BadRequest("Choose a department")
-            label = department["name"]
-            recipients = {row["id"] for row in connection.execute(
-                "SELECT id FROM users WHERE role = 'department_head' AND active = 1 AND department_id = ?", (department["id"],)
-            ).fetchall()}
-        try:
-            collaborator_id = connection.execute(
-                """
-                INSERT INTO letter_collaborators(letter_id, user_id, department_id, can_edit, request_note, due_date, added_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id
-                """,
-                (letter_id, int(user_id) if user_id else None, int(department_id) if department_id else None,
-                 can_edit_letter, note, due_date, actor["id"]),
-            ).fetchone()["id"]
-        except IntegrityError:
-            raise BadRequest(f"{label} is already collaborating on this letter") from None
-        _audit(connection, letter_id, actor["id"], "collaborator_added", letter["status"], letter["status"],
-               {"collaborator": label, "details": note, "can_edit": bool(can_edit_letter)})
+                raise BadRequest("One of the departments chosen does not exist")
+            if department_id not in taken_departments:
+                members = {row["id"] for row in connection.execute(
+                    "SELECT id FROM users WHERE active = 1 AND deleted_at IS NULL AND department_id = ?", (department_id,)
+                ).fetchall()}
+                chosen.append((None, department_id, department["name"], members))
+        if not chosen:
+            raise BadRequest("Everyone chosen is already a collaborator on this letter")
         reference = letter["our_reference"] or letter["reference"]
-        ask = f" {note}" if note else ""
-        for user in recipients - {actor['id']}:
-            _notify(connection, user, letter_id, "collaboration", f"{actor['display_name']} needs your input",
-                    f"{reference}: {letter['subject']}.{ask}")
+        message = f" {note}" if note else ""
+        for user_id, department_id, label, recipients in chosen:
+            connection.execute(
+                """
+                INSERT INTO letter_collaborators(letter_id, user_id, department_id, can_edit, request_note, added_by)
+                VALUES (?, ?, ?, 1, ?, ?)
+                """,
+                (letter_id, user_id, department_id, note, actor["id"]),
+            )
+            _audit(connection, letter_id, actor["id"], "collaborator_added", letter["status"], letter["status"],
+                   {"collaborator": label, "details": note})
+            for user in recipients - {actor["id"]}:
+                _notify(connection, user, letter_id, "collaboration", f"{actor['display_name']} added you to a letter",
+                        f"{reference}: {letter['subject']}.{message}")
         connection.commit()
-        return collaborator_id
+        return {"added": [label for _, _, label, _ in chosen]}
     finally:
         connection.close()
 
@@ -281,51 +296,6 @@ def remove_collaborator(actor, letter_id: int, collaborator_id: int):
         connection.commit()
     finally:
         connection.close()
-
-
-def complete_collaboration(actor, letter_id: int, collaborator_id: int, note: str | None = None):
-    """The collaborator (or someone from the department brought in) says their part is done."""
-    note = (note or "").strip() or None
-    connection = connect()
-    try:
-        letter = _get_letter(connection, letter_id)
-        collaborator = _get_collaborator(connection, letter_id, collaborator_id)
-        theirs = collaborator["user_id"] == actor["id"] or (
-            collaborator["department_id"] is not None and collaborator["department_id"] == actor["department_id"]
-        )
-        if not (theirs or may_manage_collaborators(actor, letter)):
-            raise Forbidden("Only the collaborator, or whoever handles the letter, can mark this done")
-        if collaborator["status"] == "done":
-            raise BadRequest("This part is already done")
-        connection.execute(
-            "UPDATE letter_collaborators SET status = 'done', done_note = ?, done_at = ?, done_by = ? WHERE id = ?",
-            (note, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), actor["id"], collaborator_id),
-        )
-        label = _label(connection, collaborator)
-        _audit(connection, letter_id, actor["id"], "collaboration_done", letter["status"], letter["status"],
-               {"collaborator": label, "details": note})
-        if note:
-            connection.execute(
-                "INSERT INTO letter_comments(letter_id, parent_id, author_id, body) VALUES (?, NULL, ?, ?)",
-                (letter_id, actor["id"], note),
-            )
-        reference = letter["our_reference"] or letter["reference"]
-        for user in ({letter["assigned_to"], collaborator["added_by"]} - {None, actor["id"]}):
-            _notify(connection, user, letter_id, "collaboration", f"{label}: input done",
-                    f"{reference}: {note or 'Their part is done.'}")
-        connection.commit()
-    finally:
-        connection.close()
-
-
-def _clean_due(value):
-    value = (value or "").strip() or None
-    if value:
-        try:
-            datetime.strptime(value, "%Y-%m-%d")
-        except ValueError:
-            raise BadRequest("The due date must be in YYYY-MM-DD format") from None
-    return value
 
 
 def people() -> list:

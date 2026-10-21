@@ -254,80 +254,63 @@ def test_department_head_can_sign_a_letter_instead_of_the_md(client):
     assert "Approved by Managing Director" in text
 
 
-def test_bringing_people_and_departments_into_a_letter(client):
+def test_adding_several_collaborators_at_once(client):
     client, department_id, users = client
     letter = register(client, department_id)
-    login(client, "head")
-    client.post(f"/letters/{letter['id']}/assign", json={"assignee_id": users["member"]})
-    finance = next(d["id"] for d in client.get("/departments").get_json() if d["name"] == "Finance and Accounts")
+    departments = {d["name"]: d["id"] for d in client.get("/departments").get_json()}
 
-    # Not yet involved: Finance and Civil cannot see it.
-    login(client, "financeandaccountsmember")
-    assert client.get(f"/letters/{letter['id']}").status_code == 403
-
-    login(client, "head")
-    assert client.post(f"/letters/{letter['id']}/collaborators", json={"department_id": finance, "request_note": "Confirm the tax amount.", "due_date": "2026-11-01"}).status_code == 201
-    assert client.post(f"/letters/{letter['id']}/collaborators", json={"user_id": users["civilmember"], "request_note": "Check the site dates."}).status_code == 201
-    assert client.post(f"/letters/{letter['id']}/collaborators", json={"department_id": finance}).status_code == 400
-    assert client.post(f"/letters/{letter['id']}/collaborators", json={"user_id": users["civilmember"], "department_id": finance}).status_code == 400
-
-    # Finance's head is asked; anyone in Finance can see the letter and answer for the department.
-    login(client, "financeandaccountshead")
-    assert any(n["kind"] == "collaboration" and "Confirm the tax amount" in n["body"] for n in client.get("/notifications").get_json())
-    login(client, "financeandaccountsmember")
-    listed = {row["id"]: row for row in client.get("/letters").get_json()}
-    assert listed[letter["id"]]["input_requested"] is True and listed[letter["id"]]["open_collaborations"] == 2
-    detail = client.get(f"/letters/{letter['id']}").get_json()
-    finance_part = next(c for c in detail["collaborators"] if c["department_id"] == finance)
-    assert detail["may_manage_collaborators"] is False
-    assert client.post(f"/letters/{letter['id']}/collaborators", json={"user_id": users["hrmember"]}).status_code == 403
-    assert client.post(f"/letters/{letter['id']}/collaborators/{finance_part['id']}/done", json={"note": "Amount confirmed: GHS 12,400."}).status_code == 200
-    assert client.post(f"/letters/{letter['id']}/collaborators/{finance_part['id']}/done", json={}).status_code == 400
-
-    # The person handling the letter hears about it, and the note joins the input thread.
-    login(client, "member")
-    assert any(n["title"] == "Finance and Accounts: input done" for n in client.get("/notifications").get_json())
-    detail = client.get(f"/letters/{letter['id']}").get_json()
-    assert detail["comments"][-1]["body"] == "Amount confirmed: GHS 12,400."
-    assert [c["status"] for c in detail["collaborators"]] == ["done", "open"]
-
-    # A civil team member who was named directly can see it; someone not involved still cannot.
-    login(client, "civilmember")
-    assert client.get(f"/letters/{letter['id']}").status_code == 200
-    login(client, "hrhead")
-    assert client.get(f"/letters/{letter['id']}").status_code == 403
-
-    # The handler can take someone off again.
-    login(client, "member")
-    civil_part = next(c for c in detail["collaborators"] if c["user_id"] == users["civilmember"])
-    assert client.delete(f"/letters/{letter['id']}/collaborators/{civil_part['id']}").status_code == 200
     login(client, "civilmember")
     assert client.get(f"/letters/{letter['id']}").status_code == 403
 
+    login(client, "head")
+    added = client.post(f"/letters/{letter['id']}/collaborators", json={
+        "user_ids": [users["civilmember"], users["financeandaccountsmember"]],
+        "department_ids": [departments["HR"]],
+        "request_note": "Please check the figures and dates.",
+    })
+    assert added.status_code == 201
+    assert sorted(added.get_json()["added"]) == ["Civil Team Member", "Finance and Accounts Team Member", "HR"]
 
-def test_co_writers_can_edit_an_outgoing_letter(client):
+    # Everyone added, and everyone in a department added, is told and can open the letter.
+    for username in ("civilmember", "financeandaccountsmember", "hrhead", "hrmember"):
+        login(client, username)
+        assert any(n["kind"] == "collaboration" and "Please check the figures" in n["body"] for n in client.get("/notifications").get_json()), username
+        assert client.get(f"/letters/{letter['id']}").status_code == 200, username
+        listed = {row["id"]: row for row in client.get("/letters").get_json()}
+        assert listed[letter["id"]]["shared_with_me"] is True and listed[letter["id"]]["collaborator_count"] == 3
+
+    # Adding people already there does nothing; a mix adds only the new ones.
+    login(client, "civilmember")
+    assert client.post(f"/letters/{letter['id']}/collaborators", json={"user_ids": [users["financeandaccountsmember"]]}).status_code == 400
+    mixed = client.post(f"/letters/{letter['id']}/collaborators", json={"user_ids": [users["financeandaccountsmember"], users["salesandmarketingmember"]]})
+    assert mixed.get_json()["added"] == ["Sales and Marketing Team Member"]
+    assert client.post(f"/letters/{letter['id']}/collaborators", json={}).status_code == 400
+
+    # Anyone working on the letter can take a collaborator off; they lose access.
+    detail = client.get(f"/letters/{letter['id']}").get_json()
+    assert detail["may_manage_collaborators"] is True and len(detail["collaborators"]) == 4
+    sales = next(c for c in detail["collaborators"] if c["user_id"] == users["salesandmarketingmember"])
+    assert client.delete(f"/letters/{letter['id']}/collaborators/{sales['id']}").status_code == 200
+    login(client, "salesandmarketingmember")
+    assert client.get(f"/letters/{letter['id']}").status_code == 403
+
+
+def test_collaborators_share_control_of_the_letter(client):
     client, department_id, users = client
     login(client, "member")
     letter = client.post("/letters/outgoing", json={"recipient": "Lands Commission", "subject": "Joint letter"}).get_json()
-    client.post(f"/letters/{letter['id']}/collaborators", json={"user_id": users["civilmember"], "can_edit": True})
-    client.post(f"/letters/{letter['id']}/collaborators", json={"user_id": users["hrmember"]})
+    client.post(f"/letters/{letter['id']}/collaborators", json={"user_id": users["civilmember"]})
     login(client, "civilmember")
+    finance = next(d["id"] for d in client.get("/departments").get_json() if d["name"] == "Finance and Accounts")
+    # The person brought in edits, changes status, brings others in, and sends it for approval.
     assert client.put(f"/letters/{letter['id']}/response", json={"body_html": "<p>Civil's section.</p>"}).status_code == 200
+    assert client.post(f"/letters/{letter['id']}/matter-status", json={"matter_status": "open", "remarks": "Civil added site dates"}).status_code == 200
+    assert client.post(f"/letters/{letter['id']}/collaborators", json={"department_id": finance}).status_code == 201
+    # Anyone in a department brought in has the same control.
+    login(client, "financeandaccountsmember")
+    assert client.put(f"/letters/{letter['id']}/response", json={"body_html": "<p>Civil's section.</p><p>Finance's figures.</p>"}).status_code == 200
+    assert client.post(f"/letters/{letter['id']}/submit").get_json()["status"] == "dept_review"
+    # Someone not brought in has none of it.
     login(client, "hrmember")
-    assert client.get(f"/letters/{letter['id']}").status_code == 200
+    assert client.get(f"/letters/{letter['id']}").status_code == 403
     assert client.put(f"/letters/{letter['id']}/response", json={"body_html": "<p>HR edit.</p>"}).status_code == 403
-
-
-def test_collaborators_are_reminded_of_their_due_date(client):
-    import db
-    import reminders
-
-    client, department_id, users = client
-    today = datetime.now(timezone.utc).date()
-    letter = register(client, department_id)
-    login(client, "head")
-    client.post(f"/letters/{letter['id']}/collaborators", json={"user_id": users["civilmember"], "due_date": today.isoformat()})
-    with db.connect() as connection:
-        assert reminders.send_deadline_notices(connection, today) == 1
-    login(client, "civilmember")
-    assert [n["title"] for n in client.get("/notifications").get_json() if n["kind"] == "deadline"] == ["Your input: due today"]

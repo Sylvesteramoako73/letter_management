@@ -337,7 +337,7 @@ function updateNavCounts() {
   const counter = $('#nav-action-count');
   if (!counter || !state.letters) return;
   const action = roleConfig(state.user.role).action;
-  const count = state.letters.filter((l) => action(l) || l.input_requested).length;
+  const count = state.letters.filter(action).length;
   counter.textContent = count;
   counter.classList.toggle('hidden', count === 0);
 }
@@ -398,7 +398,7 @@ function letterRow(letter, { showDept = true } = {}) {
     <span class="row-stripe"></span>
     <span class="row-main"><span class="row-ref">${isOutgoing(letter) ? `${icon('send', 'inline')} OUT · ` : `${icon('inbox', 'inline')} IN · `}${esc(letter.our_reference || letter.reference)}</span><span class="row-title">${esc(letter.subject)}</span>
     <span class="row-sub">${isOutgoing(letter) ? 'To ' : 'From '}${esc(letter.sender)}${showDept ? ` · ${esc(letter.department_name)}` : ''}${esc(who)}</span></span>
-    <span class="row-side">${letter.matter_status === 'closed' ? matterPill(letter) : stagePill(letter)}<span class="row-meta">${letter.input_requested ? `<span class="chip out">${icon('users')}Your input</span>` : letter.open_collaborations ? `<span class="chip">${icon('users')}${letter.open_collaborations} waiting</span>` : ''}${priorityChip(letter.priority)}${dueChip(letter)}</span></span></a>`;
+    <span class="row-side">${letter.matter_status === 'closed' ? matterPill(letter) : stagePill(letter)}<span class="row-meta">${letter.shared_with_me ? `<span class="chip out">${icon('users')}Shared with you</span>` : letter.collaborator_count ? `<span class="chip">${icon('users')}${letter.collaborator_count}</span>` : ''}${priorityChip(letter.priority)}${dueChip(letter)}</span></span></a>`;
 }
 
 function skeleton() {
@@ -421,8 +421,8 @@ async function renderDashboard() {
       <span class="kpi-top"><span>${esc(kpi.label)}</span><span class="kpi-icon">${icon(kpi.icon)}</span></span>
       <strong>${value}</strong><small>${esc(kpi.hint)}</small></a>`;
   }).join('');
-  // Everyone, whatever their role, sees letters others have brought them into first.
-  const inputQueue = { title: 'Your input is requested', sub: 'Letters you or your department were brought into. Open one, give your input and mark your part done.', filter: (l) => l.input_requested, hideWhenEmpty: true };
+  // Everyone, whatever their role, sees letters they were added to first.
+  const inputQueue = { title: 'Shared with you', sub: 'Open letters you or your department were added to as collaborators.', filter: (l) => l.shared_with_me && isOpen(l), hideWhenEmpty: true };
   const queues = [inputQueue, ...config.queues].map((queue) => {
     let items = letters.filter(queue.filter);
     items = queue.sort === 'recent' ? items.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))) : items.sort(byUrgency);
@@ -574,8 +574,7 @@ function canEdit(letter) {
   if (!isOutgoing(letter) || letter.status === 'finalized') return false;
   if (state.user.role === 'md') return true;
   if (letter.status === 'dept_review') return isHeadOf(letter);
-  const coWriter = (letter.collaborators || []).some((c) => c.user_id === state.user.id && c.can_edit);
-  return (letter.assigned_to === state.user.id || coWriter) && drafting(letter);
+  return handlesLetter(letter) && drafting(letter);
 }
 
 // The company letterhead, as it prints: header with Our Ref under the rule, watermark behind, footer at the end.
@@ -725,9 +724,8 @@ function describeEvent(event, letter) {
     dispatched: ['send', 'blue', `Sent by ${esc(DISPATCH_METHODS[details.method] || details.method)} on ${esc(fmtDate(details.sent_on))} · recorded by ${who}`],
     delivery_recorded: ['check', details.outcome === 'delivered' ? 'green' : 'red', `${details.outcome === 'delivered' ? 'Delivered' : 'Returned undelivered'} on ${esc(fmtDate(details.date))} · recorded by ${who}${details.closed ? ' · correspondence closed' : ''}`],
     tracking_updated: ['check', '', `Tracking updated by ${who}: ${esc(Object.keys(details.changes || {}).map((f) => ({ matter_status: `status ${MATTER[details.to] || details.to}`, status_remarks: 'remarks', action_required: 'action required', due_date: 'deadline' }[f] || f)).join(', '))}`],
-    collaborator_added: ['users', 'blue', `${esc(details.collaborator || '')} brought in by ${who}${details.can_edit ? ' as a co-writer' : ''}`],
+    collaborator_added: ['users', 'blue', `${esc(details.collaborator || '')} brought in by ${who}`],
     collaborator_removed: ['x', '', `${esc(details.collaborator || '')} taken off by ${who}`],
-    collaboration_done: ['check', 'green', `${esc(details.collaborator || '')}: input done (marked by ${who})`],
     enclosure_added: ['file', '', `Enclosure “${esc(details.file_name || '')}” added by ${who}`],
     enclosure_removed: ['x', '', `Enclosure “${esc(details.file_name || '')}” removed by ${who}`],
     register_details_edited: ['edit', 'wine', `Details corrected by ${who}: ${esc(Object.keys(details.changes || {}).map((f) => REGISTER_LABELS[f] || f).join(', '))}`],
@@ -760,12 +758,15 @@ function latestFeedback(audit) {
 
 const isAdmin = () => can('all_letters');
 const isHeadOf = (letter) => state.user.role === 'department_head' && state.user.department_id === letter.department_id;
-const isWriter = (letter) => letter.assigned_to === state.user.id && drafting(letter);
+// Collaborators share the control of the person the letter is assigned to.
+const isCollaborator = (letter) => (letter.collaborators || []).some((c) => c.user_id === state.user.id || (c.department_id && c.department_id === state.user.department_id));
+const handlesLetter = (letter) => letter.assigned_to === state.user.id || isCollaborator(letter);
+const isWriter = (letter) => handlesLetter(letter) && drafting(letter);
 // Drafts go to the department head first unless written by a head, the MD PA or the MD.
 const goesToHead = () => !['department_head', 'md_pa', 'md'].includes(state.user.role);
-const canTrack = (letter) => isAdmin() || letter.assigned_to === state.user.id || isHeadOf(letter);
+const canTrack = (letter) => isAdmin() || handlesLetter(letter) || isHeadOf(letter);
 const canRespond = () => can('create_outgoing');
-const canDispatch = (letter) => can('dispatch_letters') || letter.assigned_to === state.user.id || isHeadOf(letter);
+const canDispatch = (letter) => can('dispatch_letters') || handlesLetter(letter) || isHeadOf(letter);
 const mayRoute = () => can('route_letters');
 const mayAssign = (letter) => can('assign_letters') && (can('all_letters') || state.user.department_id === letter.department_id);
 const draftName = (letter) => `${String(letter.our_reference || letter.reference).replaceAll('/', '-')}.docx`;
@@ -966,53 +967,78 @@ function journeyCard(letter, audit) {
     const took = index ? fmtDuration(parseTs(event.created_at) - parseTs(steps[index - 1].created_at)) : '';
     return `<li class="${index === steps.length - 1 && !done ? 'latest' : ''}"><span class="j-dot"></span><div><strong>${text}</strong><small>${esc(fmtDateTime(event.created_at))}${took ? ` · after ${took}` : ''}</small></div></li>`;
   }).join('');
-  const others = waitingOn(letter);
-  const alsoWaiting = others.length ? `<p class="also-waiting">${icon('users', 'inline')} Also waiting for input from ${others.map((c) => `<strong>${esc(collabName(c))}</strong>`).join(', ')}.</p>` : '';
-  return `<section class="card"><div class="card-head"><div><h3>Tracking</h3><p>${summary}</p>${alsoWaiting}</div>${due}</div>
+  return `<section class="card"><div class="card-head"><div><h3>Tracking</h3><p>${summary}</p></div>${due}</div>
     <ol class="journey">${rows}${done ? '' : `<li class="next"><span class="j-dot"></span><div><strong>Next: ${esc(holder)}</strong><small>Waiting now</small></div></li>`}</ol></section>`;
 }
 
-/* ---------------- Collaboration ---------------- */
+/* ---------------- Collaborators ---------------- */
 const collabName = (c) => c.user_name || c.department_name;
-const isMyPart = (c) => c.user_id === state.user.id || (c.department_id && c.department_id === state.user.department_id);
-const waitingOn = (letter) => (letter.collaborators || []).filter((c) => c.status === 'open');
+
+function pickerHtml(people, { takenUsers = new Set(), takenDepartments = new Set(), message = true } = {}) {
+  const option = (kind, id, label, detail) => `<label class="pick" data-search="${esc(`${label} ${detail}`.toLowerCase())}"><input type="checkbox" data-kind="${kind}" value="${id}"><span><strong>${esc(label)}</strong><small>${esc(detail)}</small></span></label>`;
+  const departments = state.departments.filter((d) => !takenDepartments.has(d.id)).map((d) => option('department', d.id, d.name, 'Whole department'));
+  const persons = people.filter((person) => !takenUsers.has(person.id) && person.id !== state.user.id)
+    .map((person) => option('user', person.id, person.display_name, `${ROLE_NAMES[person.role] || ''}${person.department_name ? ` · ${person.department_name}` : ''}`));
+  return `<div class="picker">
+    <label class="search collab-search"><span class="sr-only">Find people or departments</span>${icon('search')}<input class="picker-filter" placeholder="Find a person or department" autocomplete="off"></label>
+    <div class="pick-list">
+      ${departments.length ? `<p class="pick-group">Departments</p>${departments.join('')}` : ''}
+      ${persons.length ? `<p class="pick-group">People</p>${persons.join('')}` : ''}
+    </div>
+    ${message ? '<label><span>Message <span class="hint">(optional, included in their notification)</span></span><textarea class="picker-note" rows="2" placeholder="e.g. Please help with the figures in this letter."></textarea></label>' : ''}
+    <span class="count-note picker-count">None selected</span></div>`;
+}
+
+function readPicker(root) {
+  const ticked = $$('.pick-list input:checked', root);
+  return {
+    user_ids: ticked.filter((box) => box.dataset.kind === 'user').map((box) => Number(box.value)),
+    department_ids: ticked.filter((box) => box.dataset.kind === 'department').map((box) => Number(box.value)),
+    request_note: $('.picker-note', root)?.value || '',
+    count: ticked.length,
+  };
+}
+
+// Filtering and the "N selected" count work for every picker on the page.
+document.addEventListener('input', (event) => {
+  const picker = event.target.closest('.picker');
+  if (!picker) return;
+  if (event.target.classList.contains('picker-filter')) {
+    const query = event.target.value.trim().toLowerCase();
+    $$('.pick', picker).forEach((pick) => pick.classList.toggle('hidden', Boolean(query) && !pick.dataset.search.includes(query)));
+  }
+  const count = $$('.pick-list input:checked', picker).length;
+  $('.picker-count', picker).textContent = count ? `${count} selected` : 'None selected';
+});
+
+// Adds the people and departments ticked in a form to the letter just created.
+async function addPicked(letterId, root) {
+  const picked = readPicker(root);
+  if (!picked.count) return 0;
+  await api(`/letters/${letterId}/collaborators`, { method: 'POST', json: picked });
+  return picked.count;
+}
 
 async function collaborationCard(letter) {
   const parts = letter.collaborators || [];
   const manage = letter.may_manage_collaborators && !(letter.status === 'finalized' && letter.matter_status === 'closed');
   if (!parts.length && !manage) return '';
-  const entry = (c) => {
-    const mine = isMyPart(c) && c.status === 'open';
-    return `<li class="collab ${c.status}">
+  const entry = (c) => `<li class="collab">
       <span class="avatar sm">${c.department_id ? icon('users') : esc(initials(c.user_name))}</span>
-      <div class="collab-main">
-        <p class="collab-who"><strong>${esc(collabName(c))}</strong>${c.department_id ? ' <span class="chip">Department</span>' : ` <span class="sub">${esc(ROLE_NAMES[c.user_role] || '')}${c.user_department ? ` · ${esc(c.user_department)}` : ''}</span>`}${c.can_edit ? ' <span class="chip out">Co-writer</span>' : ''}</p>
-        ${c.request_note ? `<p class="collab-ask">“${esc(c.request_note)}”</p>` : ''}
-        <p class="sub">Added by ${esc(c.added_by_name)}${c.due_date ? ` · due ${esc(fmtDate(c.due_date))}` : ''}${c.status === 'done' ? ` · done ${esc(timeAgo(c.done_at))} by ${esc(c.done_by_name || '')}` : ''}</p>
-        ${c.done_note ? `<p class="collab-done-note">${esc(c.done_note)}</p>` : ''}
-        ${mine ? `<div class="collab-done-box hidden" id="done-box-${c.id}"><textarea rows="2" placeholder="Your input (optional): it goes into Input & responses"></textarea>
-          <div class="btn-row"><button class="btn btn-success btn-sm" data-act="collab-done" data-collab="${c.id}">${icon('check')}Mark done</button></div></div>` : ''}
-      </div>
-      <div class="collab-side">${c.status === 'done' ? '<span class="pill dispatch-delivered">Done</span>' : '<span class="pill dispatch-pending">Waiting</span>'}
-        ${mine ? `<button class="btn btn-secondary btn-sm" data-act="collab-done-toggle" data-collab="${c.id}">My part is done</button>` : ''}
-        ${manage ? `<button class="btn btn-ghost btn-sm" data-act="collab-remove" data-collab="${c.id}" data-name="${esc(collabName(c))}" title="Remove">${icon('x')}</button>` : ''}</div></li>`;
-  };
-  let form = '';
+      <div class="collab-main"><p class="collab-who"><strong>${esc(collabName(c))}</strong> <span class="sub">${c.department_id ? 'Whole department' : `${esc(ROLE_NAMES[c.user_role] || '')}${c.user_department ? ` · ${esc(c.user_department)}` : ''}`}</span></p>
+        <p class="sub">Added by ${esc(c.added_by_name)} · ${esc(timeAgo(c.created_at))}</p>
+        ${c.request_note ? `<p class="collab-ask">“${esc(c.request_note)}”</p>` : ''}</div>
+      ${manage ? `<button class="btn btn-ghost btn-sm" data-act="collab-remove" data-collab="${c.id}" data-name="${esc(collabName(c))}" title="Remove">${icon('x')}</button>` : ''}</li>`;
+  let picker = '';
   if (manage) {
     const people = await api('/people').catch(() => []);
-    const taken = new Set(parts.map((c) => (c.user_id ? `u${c.user_id}` : `d${c.department_id}`)));
-    const personOptions = people.filter((p) => !taken.has(`u${p.id}`)).map((p) => `<option value="u${p.id}">${esc(p.display_name)} · ${esc(ROLE_NAMES[p.role] || '')}${p.department_name ? `, ${esc(p.department_name)}` : ''}</option>`).join('');
-    const departmentOptions = state.departments.filter((d) => !taken.has(`d${d.id}`)).map((d) => `<option value="d${d.id}">${esc(d.name)} (whole department)</option>`).join('');
-    form = `<details class="collab-add" ${parts.length ? '' : 'open'}><summary>${icon('plus')}Bring someone in</summary>
-      <label>Person or department<select id="collab-who"><option value="">Choose…</option><optgroup label="Departments">${departmentOptions}</optgroup><optgroup label="People">${personOptions}</optgroup></select></label>
-      <label><span>What do you need from them? <span class="hint">(optional)</span></span><textarea id="collab-note" rows="2" placeholder="e.g. Confirm the amount owed before we reply."></textarea></label>
-      <div class="form-pair"><label><span>Needed by <span class="hint">(optional)</span></span><input id="collab-due" type="date" min="${todayISO()}"></label>
-        ${isOutgoing(letter) ? '<label class="check co-writer"><input id="collab-edit" type="checkbox"> Can also edit the letter</label>' : '<span></span>'}</div>
-      <div class="btn-row"><button class="btn btn-primary" data-act="collab-add">${icon('users')}Add to this letter</button></div></details>`;
+    const taken = { takenUsers: new Set([...parts.map((c) => c.user_id).filter(Boolean), letter.assigned_to]), takenDepartments: new Set(parts.map((c) => c.department_id).filter(Boolean)) };
+    picker = `<details class="collab-add" ${parts.length ? '' : 'open'}><summary>${icon('plus')}Add collaborators</summary>
+      ${pickerHtml(people, taken)}
+      <div class="btn-row"><button class="btn btn-primary" data-act="collab-add">${icon('users')}Add selected</button></div></details>`;
   }
-  const open = waitingOn(letter).length;
-  return `<section class="card" id="collaboration"><div class="card-head"><div><h3>Collaboration</h3><p>${parts.length ? `${open ? `Waiting on ${open} of ${parts.length}.` : 'Everyone has given their input.'}` : 'Bring in other people or departments whose attention this letter needs.'}</p></div></div>
-    <div class="action-body">${parts.length ? `<ul class="collab-list">${parts.map(entry).join('')}</ul>` : ''}${form}</div></section>`;
+  return `<section class="card" id="collaboration"><div class="card-head"><div><h3>Collaborators</h3><p>Everyone added has the same access to this letter as whoever is handling it.</p></div>${parts.length ? `<span class="count-note">${parts.length}</span>` : ''}</div>
+    <div class="action-body">${parts.length ? `<ul class="collab-list">${parts.map(entry).join('')}</ul>` : ''}${picker}</div></section>`;
 }
 
 /* ---------------- Enclosures ---------------- */
@@ -1251,25 +1277,13 @@ function bindActions(letter) {
     if (!button) return;
     const act = button.dataset.act;
     if (act === 'collab-add') {
-      const choice = $('#collab-who').value;
-      if (!choice) { toast('Choose a person or a department.', 'error'); $('#collab-who').focus(); return; }
-      const payload = { request_note: $('#collab-note').value, due_date: $('#collab-due').value, can_edit: Boolean($('#collab-edit')?.checked) };
-      payload[choice[0] === 'u' ? 'user_id' : 'department_id'] = Number(choice.slice(1));
-      return run(button, 'POST', `/letters/${letter.id}/collaborators`, payload, `${$('#collab-who').selectedOptions[0].textContent.split(' · ')[0].replace(' (whole department)', '')} has been brought in and notified.`);
+      const { count, ...payload } = readPicker($('#collaboration'));
+      if (!count) { toast('Tick at least one person or department.', 'error'); return; }
+      return run(button, 'POST', `/letters/${letter.id}/collaborators`, payload, count === 1 ? 'Collaborator added and notified.' : `${count} collaborators added and notified.`);
     }
     if (act === 'collab-remove') {
-      if (!(await modal({ title: `Take ${button.dataset.name} off this letter?`, body: 'They will no longer see it unless they handle it anyway.', confirmText: 'Remove' }))) return;
+      if (!(await modal({ title: `Remove ${button.dataset.name}?`, body: 'They will no longer have access to this letter, unless they handle it anyway.', confirmText: 'Remove' }))) return;
       return run(button, 'DELETE', `/letters/${letter.id}/collaborators/${button.dataset.collab}`, undefined, `${button.dataset.name} removed.`);
-    }
-    if (act === 'collab-done-toggle') {
-      const box = $(`#done-box-${button.dataset.collab}`);
-      box.classList.toggle('hidden');
-      if (!box.classList.contains('hidden')) $('textarea', box).focus();
-      return;
-    }
-    if (act === 'collab-done') {
-      const note = $(`#done-box-${button.dataset.collab} textarea`).value;
-      return run(button, 'POST', `/letters/${letter.id}/collaborators/${button.dataset.collab}/done`, { note }, 'Marked done. They have been told.');
     }
     if (act === 'enc-remove') {
       if (!(await modal({ title: 'Remove this enclosure?', body: 'It will no longer go with the letter.', confirmText: 'Remove' }))) return;
@@ -1408,6 +1422,8 @@ function renderIntake() {
         <label>Priority<select name="priority"><option value="normal">Normal</option><option value="high">High</option><option value="urgent">Urgent</option><option value="low">Low</option></select></label>
         <label>Confidentiality<select name="confidentiality"><option value="internal">Internal</option><option value="confidential">Confidential</option><option value="restricted">Restricted</option></select></label>
         <label class="wide"><span>Notes for the department <span class="hint">(optional)</span></span><textarea name="notes" rows="3" placeholder="Anything the department should know"></textarea></label>
+        <p class="form-section-title">Collaborators <span class="hint">optional · other people or departments who should work on this letter too</span></p>
+        <div class="wide" id="intake-collaborators"><p class="hint-text">Loading people…</p></div>
       </div>
       <div class="form-foot"><div class="progress-wrap hidden" id="progress"><span id="progress-text">Uploading…</span><div class="progress"><span id="progress-bar"></span></div></div>
         <button class="btn btn-primary" id="intake-submit">${icon('check')}Register letter</button></div>
@@ -1418,6 +1434,7 @@ function renderIntake() {
       <div class="tip"><b>3</b><span>Pick the department that should respond. Its head is notified and assigns someone.</span></div>
       <div class="tip"><b>4</b><span>The scan and all details are saved in a folder for this letter. The reply gets its own reference, e.g. SIGL/MOF/AC/0001.</span></div>
     </div></aside></div>`;
+  api('/people').then((people) => { $('#intake-collaborators').innerHTML = pickerHtml(people); }).catch(() => { $('#intake-collaborators').innerHTML = ''; });
   let file = null;
   const drawFile = () => {
     const slot = $('#file-slot');
@@ -1468,6 +1485,8 @@ function renderIntake() {
         progress(1, 'Done');
         state.letters = null;
         toast(`${letter.reference} registered and sent to ${departmentName(letter.department_id)}.`);
+        const added = await addPicked(letter.id, $('#intake-collaborators')).catch((error) => { toast(`Letter registered, but collaborators were not added: ${error.message}`, 'error'); return 0; });
+        if (added) toast(`${added} collaborator${added > 1 ? 's' : ''} added and notified.`);
         location.hash = `#/letter/${letter.id}`;
       } catch (error) {
         $('#progress').classList.add('hidden');
@@ -1528,6 +1547,8 @@ async function renderCompose(params) {
         <label><span>Send by <span class="hint">(optional)</span></span><input name="due_date" type="date" min="${todayISO()}"></label>
         <label>Priority<select name="priority"><option value="normal">Normal</option><option value="high">High</option><option value="urgent">Urgent</option><option value="low">Low</option></select></label>
         <label class="wide"><span>Instructions for the writer <span class="hint">(optional)</span></span><textarea name="notes" rows="2" placeholder="What the letter should say"></textarea></label>
+        <p class="form-section-title">Collaborators <span class="hint">optional · everyone added has the same access to this letter</span></p>
+        <div class="wide" id="compose-collaborators"><p class="hint-text">Loading people…</p></div>
       </div>
       <div class="form-foot"><span class="ref-preview">Our Ref: <b class="mono" id="ref-preview">SIGL/…</b></span>
         <button class="btn btn-primary" id="compose-submit">${icon('check')}Create outgoing letter</button></div>
@@ -1539,6 +1560,7 @@ async function renderCompose(params) {
       <div class="tip"><b>4</b><span>Once approved it becomes a locked PDF. The front desk dispatches it and records delivery.</span></div>
     </div></aside></div>`;
   const form = $('#compose-form');
+  api('/people').then((people) => { $('#compose-collaborators').innerHTML = pickerHtml(people); }).catch(() => { $('#compose-collaborators').innerHTML = ''; });
   const deptId = () => Number(choosesDept ? form.elements.department_id.value : state.user.department_id);
   // Who writes it: team members write their own; heads, the MD and MD PA may pick; the front desk leaves it to the department.
   const drawWriter = () => {
@@ -1593,6 +1615,8 @@ async function renderCompose(params) {
       try {
         const letter = await api('/letters/outgoing', { method: 'POST', json: Object.fromEntries(new FormData(form)) });
         state.letters = null;
+        const added = await addPicked(letter.id, $('#compose-collaborators')).catch((error) => { toast(`Letter created, but collaborators were not added: ${error.message}`, 'error'); return 0; });
+        if (added) toast(`${added} collaborator${added > 1 ? 's' : ''} added and notified.`);
         if (letter.assigned_to === state.user.id) toast(`${letter.our_reference} created. Write it in the editor.`);
         else toast(letter.assigned_to ? `${letter.our_reference} created and assigned.` : `${letter.our_reference} registered. The department head will assign a writer.`);
         location.hash = `#/letter/${letter.id}`;

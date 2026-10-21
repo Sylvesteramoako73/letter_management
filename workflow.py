@@ -81,17 +81,18 @@ def _get_letter(connection, letter_id: int):
     return letter
 
 
-def collaboration_of(user, letter_id: int):
-    """This person's part in a letter, directly or through their department, if they were brought in.
-
-    Returns {"any": bool, "can_edit": bool}.
-    """
+def is_collaborator(user, letter_id: int) -> bool:
+    """Brought into the letter, by name or through their department."""
     with connect() as connection:
-        rows = connection.execute(
-            "SELECT can_edit, user_id FROM letter_collaborators WHERE letter_id = ? AND (user_id = ? OR department_id = ?)",
+        return connection.execute(
+            "SELECT 1 FROM letter_collaborators WHERE letter_id = ? AND (user_id = ? OR department_id = ?) LIMIT 1",
             (letter_id, user["id"], user["department_id"]),
-        ).fetchall()
-    return {"any": bool(rows), "can_edit": any(row["can_edit"] and row["user_id"] == user["id"] for row in rows)}
+        ).fetchone() is not None
+
+
+def handles(user, letter) -> bool:
+    """The person the letter is assigned to, and everyone brought in to collaborate: they share the same control."""
+    return letter["assigned_to"] == user["id"] or is_collaborator(user, letter["id"])
 
 
 def can_view(user, letter) -> bool:
@@ -103,7 +104,7 @@ def can_view(user, letter) -> bool:
     if user["role"] == "department_head" and user["department_id"] == letter["department_id"]:
         return True
     # People and departments brought in to collaborate.
-    return collaboration_of(user, letter["id"])["any"]
+    return is_collaborator(user, letter["id"])
 
 
 def require_view(user, letter) -> None:
@@ -498,11 +499,11 @@ def set_tracking(actor, letter_id: int, payload: dict):
         letter = _get_letter(connection, letter_id)
         allowed = (
             is_admin(actor)
-            or letter["assigned_to"] == actor["id"]
+            or handles(actor, letter)
             or (actor["role"] == "department_head" and actor["department_id"] == letter["department_id"])
         )
         if not allowed:
-            raise Forbidden("Only the department, the assignee, the MD or the MD PA can update the status")
+            raise Forbidden("Only those handling the letter, its department head, the MD or the MD PA can update the status")
         changes = {}
         if "matter_status" in payload:
             matter_status = (payload.get("matter_status") or "").strip().lower()
@@ -829,14 +830,14 @@ def create_outgoing(actor, payload: dict):
 def _require_drafter(actor, letter) -> None:
     if not is_outgoing(letter):
         raise BadRequest("Press Respond to start the reply as an outgoing letter")
-    if letter["assigned_to"] != actor["id"]:
-        raise Forbidden("Only the person writing this letter can edit it")
+    if not handles(actor, letter):
+        raise Forbidden("Only the people writing this letter can edit it")
     if letter["status"] not in DRAFTING_STATUSES:
         raise Forbidden("Letters in review or approved cannot be edited")
 
 
 def can_edit(actor, letter) -> bool:
-    """The writer and any co-writers while drafting, the department head while reviewing it, and the MD until approval."""
+    """The writer and collaborators while drafting, the department head while reviewing it, and the MD until approval."""
     if not is_outgoing(letter) or letter["status"] == "finalized":
         return False
     if actor["role"] == "md":
@@ -845,7 +846,7 @@ def can_edit(actor, letter) -> bool:
         return actor["role"] == "department_head" and actor["department_id"] == letter["department_id"]
     if letter["status"] not in DRAFTING_STATUSES:
         return False
-    return letter["assigned_to"] == actor["id"] or collaboration_of(actor, letter["id"])["can_edit"]
+    return handles(actor, letter)
 
 
 def save_response(actor, letter_id: int, body_html: str | None = None, response_text: str | None = None):
@@ -1286,7 +1287,7 @@ def _require_dispatcher(actor, letter) -> None:
         raise Forbidden("Only approved outgoing letters can be dispatched")
     allowed = (
         can(actor, "dispatch_letters")
-        or letter["assigned_to"] == actor["id"]
+        or handles(actor, letter)
         or (actor["role"] == "department_head" and actor["department_id"] == letter["department_id"])
     )
     if not allowed:

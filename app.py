@@ -465,9 +465,9 @@ def create_app(test_config=None):
                        p.reference AS in_reply_to_reference,
                        r.id AS response_id, r.our_reference AS response_reference,
                        r.status AS response_status, r.dispatch_status AS response_dispatch_status,
-                       EXISTS (SELECT 1 FROM letter_collaborators k WHERE k.letter_id = l.id AND k.status = 'open'
-                               AND (k.user_id = ? OR k.department_id = ?)) AS input_requested,
-                       (SELECT COUNT(*) FROM letter_collaborators k WHERE k.letter_id = l.id AND k.status = 'open') AS open_collaborations
+                       EXISTS (SELECT 1 FROM letter_collaborators k WHERE k.letter_id = l.id
+                               AND (k.user_id = ? OR k.department_id = ?)) AS shared_with_me,
+                       (SELECT COUNT(*) FROM letter_collaborators k WHERE k.letter_id = l.id) AS collaborator_count
                 FROM letters l
                 JOIN departments d ON d.id = l.department_id
                 LEFT JOIN users a ON a.id = l.assigned_to
@@ -480,7 +480,7 @@ def create_app(test_config=None):
                 # The placeholders in the column list come before those in WHERE.
                 [user["id"], user["department_id"], *params],
             ).fetchall()
-        return jsonify([{**dict(letter), "input_requested": bool(letter["input_requested"])} for letter in letters])
+        return jsonify([{**dict(letter), "shared_with_me": bool(letter["shared_with_me"])} for letter in letters])
 
     @app.get("/letters/<int:letter_id>")
     @authenticated
@@ -956,21 +956,13 @@ def create_app(test_config=None):
 
     @app.post("/letters/<int:letter_id>/collaborators")
     @authenticated
-    def add_collaborator(user, letter_id):
-        collaborator_id = collaboration.add_collaborator(user, letter_id, request.get_json(silent=True) or {})
-        return jsonify(id=collaborator_id), 201
+    def add_collaborators(user, letter_id):
+        return jsonify(collaboration.add_collaborators(user, letter_id, request.get_json(silent=True) or {})), 201
 
     @app.delete("/letters/<int:letter_id>/collaborators/<int:collaborator_id>")
     @authenticated
     def remove_collaborator(user, letter_id, collaborator_id):
         collaboration.remove_collaborator(user, letter_id, collaborator_id)
-        return jsonify(ok=True)
-
-    @app.post("/letters/<int:letter_id>/collaborators/<int:collaborator_id>/done")
-    @authenticated
-    def collaboration_done(user, letter_id, collaborator_id):
-        payload = request.get_json(silent=True) or {}
-        collaboration.complete_collaboration(user, letter_id, collaborator_id, payload.get("note"))
         return jsonify(ok=True)
 
     @app.post("/letters/<int:letter_id>/comments")
