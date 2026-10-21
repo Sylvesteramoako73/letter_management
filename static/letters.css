@@ -633,3 +633,8 @@ label.check input{width:auto}
 .pick strong{font-size:.8rem}
 .pick small{color:var(--muted);font-size:.7rem}
 .pick.hidden{display:none}
+
+/* Both references under the letter title */
+.ref-line{margin:4px 0 0;font-size:13px;color:var(--muted)}
+.ref-line b{color:var(--ink);font-weight:600}
+.lh-ref{line-height:1.4}

@@ -27,7 +27,7 @@ def test_md_adds_users_and_sets_what_they_may_do(client):
     assert client.post("/login", json={"username": "akosua", "password": "temporary-pass"}).status_code == 200
     upload = client.post(
         "/letters/upload",
-        data={"sender": "GRA", "subject": "Notice", "received_date": "2026-10-20", "department_id": str(department_id),
+        data={"sender": "GRA", "subject": "Notice", "signatory": "K. Mensah", "received_date": "2026-10-20", "department_id": str(department_id),
               "document": (io.BytesIO(b"%PDF-1.4"), "scan.pdf")},
         content_type="multipart/form-data",
     )
@@ -39,7 +39,7 @@ def test_md_adds_users_and_sets_what_they_may_do(client):
     switched = client.patch(f"/users/{member['id']}", json={"permissions": {"create_outgoing": False}}).get_json()
     assert "create_outgoing" not in switched["capabilities"]
     login(client, "member")
-    assert client.post("/letters/outgoing", json={"recipient": "A", "subject": "B"}).status_code == 403
+    assert client.post("/letters/outgoing", json={"addressee": "The Director", "recipient": "A", "subject": "B"}).status_code == 403
 
     # Reports for a department head, by the MD's choice.
     login(client, "head")

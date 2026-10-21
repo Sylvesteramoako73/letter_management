@@ -194,3 +194,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_collab_user ON letter_collaborators(letter
 CREATE UNIQUE INDEX IF NOT EXISTS idx_collab_department ON letter_collaborators(letter_id, department_id) WHERE department_id IS NOT NULL;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS microsoft_oid TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_microsoft_oid ON users(microsoft_oid) WHERE microsoft_oid IS NOT NULL;
+ALTER TABLE letters ADD COLUMN IF NOT EXISTS signatory_title TEXT;
+ALTER TABLE letters ADD COLUMN IF NOT EXISTS addressee_title TEXT;

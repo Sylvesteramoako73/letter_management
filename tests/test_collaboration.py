@@ -14,7 +14,7 @@ PLAIN_TEXT = pymupdf.TEXTFLAGS_TEXT & ~pymupdf.TEXT_PRESERVE_LIGATURES
 
 def outgoing(client, username="member", **fields):
     login(client, username)
-    letter = client.post("/letters/outgoing", json={"recipient": "Lands Commission", "subject": "Site visit", **fields}).get_json()
+    letter = client.post("/letters/outgoing", json={"addressee": "The Director", "recipient": "Lands Commission", "subject": "Site visit", **fields}).get_json()
     client.put(f"/letters/{letter['id']}/response", json={"body_html": "<p>Body of the letter.</p>"})
     return letter
 
@@ -226,8 +226,8 @@ def test_department_head_can_sign_a_letter_instead_of_the_md(client):
     assert choices[0] == {"id": "md", "name": "Managing Director", "title": "Managing Director"}
     assert {"id": users["head"], "name": "Administration Head", "title": "Head, Administration"} in choices
     # Only a head of the sending department can sign.
-    assert client.post("/letters/outgoing", json={"recipient": "A", "subject": "B", "signatory_id": users["civilhead"]}).status_code == 400
-    letter = client.post("/letters/outgoing", json={"recipient": "Lands Commission", "subject": "Site visit", "signatory_id": users["head"]}).get_json()
+    assert client.post("/letters/outgoing", json={"addressee": "The Director", "recipient": "A", "subject": "B", "signatory_id": users["civilhead"]}).status_code == 400
+    letter = client.post("/letters/outgoing", json={"addressee": "The Director", "recipient": "Lands Commission", "subject": "Site visit", "signatory_id": users["head"]}).get_json()
     assert letter["signatory_id"] == users["head"]
     client.put(f"/letters/{letter['id']}/response", json={"response_text": "Please receive our team on Monday."})
     assert client.get(f"/letters/{letter['id']}").get_json()["signatory"]["title"] == "Head, Administration"
@@ -298,7 +298,7 @@ def test_adding_several_collaborators_at_once(client):
 def test_collaborators_share_control_of_the_letter(client):
     client, department_id, users = client
     login(client, "member")
-    letter = client.post("/letters/outgoing", json={"recipient": "Lands Commission", "subject": "Joint letter"}).get_json()
+    letter = client.post("/letters/outgoing", json={"addressee": "The Director", "recipient": "Lands Commission", "subject": "Joint letter"}).get_json()
     client.post(f"/letters/{letter['id']}/collaborators", json={"user_id": users["civilmember"]})
     login(client, "civilmember")
     finance = next(d["id"] for d in client.get("/departments").get_json() if d["name"] == "Finance and Accounts")

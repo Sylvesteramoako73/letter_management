@@ -49,7 +49,7 @@ from workflow import (
 
 LETTER_DETAIL_FIELDS = (
     "agency_reference", "category", "priority", "confidentiality", "due_date", "notes",
-    "letter_date", "signatory", "cc_parties", "received_via", "action_required",
+    "letter_date", "signatory", "signatory_title", "cc_parties", "received_via", "action_required",
 )
 
 
@@ -319,6 +319,7 @@ def create_app(test_config=None):
             payload["department_id"],
             payload["source_file"],
             payload["content"].encode("utf-8"),
+            {field: payload.get(field) for field in LETTER_DETAIL_FIELDS},
         )
         return jsonify(public_letter(letter)), 201
 
@@ -513,7 +514,8 @@ def create_app(test_config=None):
             ).fetchall()
             linked = """
                 SELECT id, reference, our_reference, subject, sender, status, dispatch_status,
-                       dispatched_on, delivered_on, finalized_at, created_at
+                       dispatched_on, delivered_on, finalized_at, created_at,
+                       CASE WHEN delivery_proof IS NULL THEN 0 ELSE 1 END AS has_proof
                 FROM letters
             """
             responses = connection.execute(f"{linked} WHERE in_reply_to = ? ORDER BY id", (letter_id,)).fetchall()

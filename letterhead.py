@@ -24,8 +24,8 @@ LETTERHEAD_PDF = str(LETTERHEAD_DIR / "sigl-letterhead.pdf")
 HEADER_PNG = LETTERHEAD_DIR / "header.png"
 FOOTER_PNG = LETTERHEAD_DIR / "footer.png"
 # In points on the A4 page: the header rule sits at y=129 and the footer rule at y=811.
-REFERENCE_AREA = (300, 133, 554, 150)
-BODY_AREA = (60, 152, 550, 795)
+REFERENCE_AREA = (300, 133, 554, 163)
+BODY_AREA = (60, 166, 550, 795)
 PLACEHOLDER = "[Write the body of the letter here.]"
 _MINOR_WORDS = {"and", "of", "the", "&", "for"}
 
@@ -57,10 +57,9 @@ def template_html(letter, body_text: str | None = None) -> str:
     """
     reply = bool(letter["in_reply_to"])
     lines = [f"<p>Date: {datetime.now(timezone.utc).strftime('%d %B %Y')}</p>", "<p><br></p>"]
-    address = [letter["addressee"], letter["sender"], *(letter["recipient_address"] or "").splitlines()]
+    # Their reference sits in the corner under ours, so it is not repeated here.
+    address = [letter["addressee"], letter["addressee_title"], letter["sender"], *(letter["recipient_address"] or "").splitlines()]
     lines += [f"<p>{escape(part.strip())}</p>" for part in address if part and part.strip()]
-    if letter["agency_reference"]:
-        lines += ["<p><br></p>", f"<p>Your Ref: {escape(letter['agency_reference'])}</p>"]
     subject = f"RE: {letter['subject']}" if reply else letter["subject"]
     lines += ["<p><br></p>", "<p>Dear Sir/Madam,</p>", f"<p><strong><u>{escape(subject.upper())}</u></strong></p>"]
     blocks = [block.strip() for block in (body_text or "").replace("\r\n", "\n").split("\n\n") if block.strip()]
@@ -227,7 +226,15 @@ def _full_width_picture(paragraph, image, margin):
     paragraph.add_run().add_picture(str(image), width=Cm(21.0))
 
 
-def _letterhead_document(our_reference: str):
+def reference_lines(our_reference: str, their_reference: str | None) -> list:
+    """The corner of the letter: our reference, and theirs when we are answering something."""
+    lines = [("Our Ref: ", our_reference)]
+    if their_reference:
+        lines.append(("Your Ref: ", their_reference))
+    return lines
+
+
+def _letterhead_document(our_reference: str, their_reference: str | None = None):
     document = Document()
     section = document.sections[0]
     section.page_width, section.page_height = Cm(21.0), Cm(29.7)
@@ -243,14 +250,15 @@ def _letterhead_document(our_reference: str):
 
     header = section.header
     _full_width_picture(header.paragraphs[0], HEADER_PNG, margin)
-    reference = header.add_paragraph()
-    reference.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    reference.paragraph_format.space_before = Pt(4)
-    label = reference.add_run("Our Ref: ")
-    label.font.size = Pt(9)
-    value = reference.add_run(our_reference)
-    value.bold = True
-    value.font.size = Pt(9)
+    for index, (label_text, value_text) in enumerate(reference_lines(our_reference, their_reference)):
+        reference = header.add_paragraph()
+        reference.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        reference.paragraph_format.space_before = Pt(4 if index == 0 else 0)
+        label = reference.add_run(label_text)
+        label.font.size = Pt(9)
+        value = reference.add_run(value_text)
+        value.bold = True
+        value.font.size = Pt(9)
     _full_width_picture(section.footer.paragraphs[0], FOOTER_PNG, margin)
     return document
 
@@ -260,9 +268,9 @@ _SIZE = {"ql-size-small": Pt(9), "ql-size-large": Pt(14), "ql-size-huge": Pt(20)
 _HEADING_SIZE = {"h1": Pt(16), "h2": Pt(14), "h3": Pt(12)}
 
 
-def html_to_docx(our_reference: str, html: str, footer_note: str | None = None) -> bytes:
+def html_to_docx(our_reference: str, html: str, footer_note: str | None = None, their_reference: str | None = None) -> bytes:
     """The letter as a Word document on letterhead."""
-    document = _letterhead_document(our_reference)
+    document = _letterhead_document(our_reference, their_reference)
     for block in _parse(html):
         style = {"ul": "List Bullet", "ol": "List Number"}.get(block["list"])
         paragraph = document.add_paragraph(style=style) if style else document.add_paragraph()

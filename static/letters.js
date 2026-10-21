@@ -65,7 +65,7 @@ const DRAFTERS = ['team_member', 'department_head', 'md_pa', 'md'];
 const REGISTER_LABELS = {
   subject: 'Subject', sender: 'Institution', letter_date: 'Date on letter', agency_reference: 'Reference on letter',
   signatory: 'Signed by', cc_parties: 'Copied parties', received_date: 'Date received', received_via: 'Received via',
-  addressee: 'Addressee', recipient_address: 'Address',
+  addressee: 'Addressee', recipient_address: 'Address', signatory_title: 'Signer’s title', addressee_title: 'Addressee’s title',
 };
 const IN_REVIEW = ['dept_review', 'submitted_for_review', 'md_review'];
 
@@ -580,13 +580,13 @@ function canEdit(letter) {
 // The company letterhead, as it prints: header with Our Ref under the rule, watermark behind, footer at the end.
 const letterheadPage = (letter, inner, cls = '') => `<div class="paper lh-paper ${cls}">
   <img class="lh-head" src="/static/letterhead/header.png" alt="Swami India Ghana Limited letterhead">
-  <div class="lh-ref">Our Ref: <b>${esc(letter.our_reference || '')}</b></div>
+  <div class="lh-ref">Our Ref: <b>${esc(letter.our_reference || '')}</b>${letter.agency_reference ? `<br>Your Ref: <b>${esc(letter.agency_reference)}</b>` : ''}</div>
   <div class="lh-body">${inner}</div>
   <img class="lh-foot" src="/static/letterhead/footer.png" alt=""></div>`;
 
 // body_html is sanitised by the server before it is stored, so it can be shown as it is.
 function closingPreview(letter) {
-  const signer = letter.signatory;
+  const signer = letter.signer;
   if (!signer || letter.status === 'finalized') return '';
   const enclosures = letter.enclosure_list || [];
   const copies = String(letter.cc_parties || '').split(/\n+/).map((line) => line.trim()).filter(Boolean);
@@ -892,13 +892,17 @@ function dispatchPanel(letter) {
       <div class="form-pair"><label>Outcome<select id="v-outcome"><option value="delivered">Delivered</option><option value="returned">Returned undelivered</option></select></label>
       <label>Date<input id="v-date" type="date" value="${today()}" max="${today()}"></label></div>
       <label><span>Received by / note <span class="hint">(optional)</span></span><input id="v-note" placeholder="e.g. Received by A. Owusu, Registry" autocomplete="off"></label>
-      <label><span>Proof of delivery <span class="hint">(optional: PDF, PNG or JPG)</span></span><input id="v-proof" type="file" accept=".pdf,.png,.jpg,.jpeg"></label>
+      <label><span>Stamped or signed copy <span class="hint">(scan as PDF, PNG or JPG; needed to close the letter)</span></span><input id="v-proof" type="file" accept=".pdf,.png,.jpg,.jpeg"></label>
       <label class="check"><input id="v-close" type="checkbox" checked> Close this correspondence once delivered</label>
+      <p class="hint-text">Without the stamped copy, the delivery is recorded and the letter stays open until the copy is uploaded.</p>
       <div class="btn-row"><button class="btn btn-success" data-act="delivery">${icon('check')}Record delivery</button></div>${files}`, 'Delivery');
   }
   return card(status === 'delivered' ? 'Delivered' : DISPATCH[status] || 'Approved', status === 'delivered' ? `Delivered on ${fmtDate(letter.delivered_on)}.` : '', `${sentLine}
     ${letter.delivery_note ? `<p class="fact-line">${icon('check', 'inline')} ${esc(letter.delivery_note)}</p>` : ''}
-    ${letter.has_delivery_proof ? `<div class="btn-row"><a class="btn btn-secondary btn-sm" href="/letters/${letter.id}/delivery-proof" style="text-decoration:none">${icon('download')}Proof of delivery</a></div>` : ''}${files}`, 'Complete');
+    ${letter.has_delivery_proof ? `<div class="btn-row"><a class="btn btn-secondary btn-sm" href="/letters/${letter.id}/delivery-proof" style="text-decoration:none">${icon('download')}Stamped copy</a></div>`
+      : status === 'delivered' ? `<div class="feedback"><strong>Stamped copy still needed</strong>Upload the scanned stamped or signed copy to close this letter.</div>
+        <label><span>Stamped or signed copy <span class="hint">(PDF, PNG or JPG)</span></span><input id="v-proof" type="file" accept=".pdf,.png,.jpg,.jpeg"></label>
+        <div class="btn-row"><button class="btn btn-success" data-act="proof-upload">${icon('upload')}Upload and close</button></div>` : ''}${files}`, letter.has_delivery_proof ? 'Complete' : 'Delivery');
 }
 
 function trackingCard(letter) {
@@ -915,9 +919,36 @@ function trackingCard(letter) {
         <label>${outgoing ? 'Send by' : 'Deadline'}<input id="m-due" type="date" value="${esc(letter.due_date || '')}"></label>
       </div>
       ${outgoing ? '' : `<label>Action required<select id="m-action"><option value="">Not set</option>${Object.entries(ACTIONS).map(([k, v]) => `<option value="${k}" ${letter.action_required === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>`}
+      <p class="hint-text">${icon('lock', 'inline')} ${outgoing ? 'Closes only once the stamped or signed copy is uploaded.' : 'If we replied, it closes once the stamped copy of the reply is uploaded.'}</p>
       <label><span>Remarks</span><textarea id="m-remarks" rows="2" placeholder="e.g. Waiting for the quotation from the supplier">${esc(letter.status_remarks || '')}</textarea></label>
       <div class="btn-row"><button class="btn btn-secondary" data-act="tracking">${icon('check')}Save</button></div>
     </div></section>`;
+}
+
+/* ---------------- People ---------------- */
+// Everyone on both sides of the letter, taken from the record and its history.
+function peopleCard(letter, audit) {
+  const outgoing = isOutgoing(letter);
+  const fact = (label, value) => (value ? `<dt>${esc(label)}</dt><dd>${value}</dd>` : '');
+  const actors = (...actions) => [...new Set(audit.filter((event) => actions.includes(event.action)).map((event) => event.display_name))];
+  const names = (list) => list.map(esc).join(', ');
+  const person = (name, title) => (name ? `${esc(name)}${title && title !== name ? `<br><span class="sub">${esc(title)}</span>` : ''}` : '');
+  const signer = letter.signer;
+  const others = (letter.collaborators || []).map(collabName);
+  return `<section class="card"><div class="card-head"><div><h3>People</h3><p>Who is involved, on our side and theirs.</p></div></div><dl class="facts">
+    ${outgoing ? fact('To receive and reply', person(letter.addressee, letter.addressee_title) || '—') : fact('Signed by (sender)', person(letter.signatory, letter.signatory_title) || '—')}
+    ${fact('Department', esc(letter.department_name))}
+    ${fact(outgoing ? 'Started by' : 'Registered by', esc(letter.created_by_name || '—'))}
+    ${fact(outgoing ? 'Writer' : 'Assigned to', letter.assignee_name ? esc(letter.assignee_name) : 'Not yet assigned')}
+    ${outgoing ? fact('Written and edited by', names(actors('response_saved', 'response_uploaded')) || 'No edits yet') : ''}
+    ${fact('Collaborators', names(others))}
+    ${outgoing ? fact('Signs for SIGL', signer ? person(signer.name, signer.title) : '—') : ''}
+    ${fact('Approved by', names(actors('department_approved', 'routed_to_md', 'approved_and_finalized', 'md_override')))}
+    ${outgoing ? fact('Dispatched by', letter.dispatched_by_name ? esc(letter.dispatched_by_name) : '') : ''}
+    ${outgoing ? '' : fact('Priority', esc(cap(letter.priority)))}
+    ${outgoing ? '' : fact('Confidentiality', esc(cap(letter.confidentiality)))}
+    ${letter.notes ? fact('Notes', esc(letter.notes)) : ''}
+  </dl></section>`;
 }
 
 /* ---------------- Tracking journey ---------------- */
@@ -939,7 +970,8 @@ function holderOf(letter) {
   }
   if (letter.matter_status === 'closed') return null;
   if (letter.status === 'finalized') {
-    return { pending: 'Front desk, to dispatch it', returned: 'Front desk, to send it again', sent: 'In transit: waiting for delivery confirmation' }[letter.dispatch_status] || null;
+    return { pending: 'Front desk, to dispatch it', returned: 'Front desk, to send it again', sent: 'In transit: waiting for delivery confirmation',
+      delivered: 'Front desk, to upload the stamped copy' }[letter.dispatch_status] || null;
   }
   return {
     intake: `${head}, to assign a writer`, in_progress: `${writer}, writing it`, changes_requested: `${writer}, revising it`,
@@ -1095,14 +1127,14 @@ function registerCard(letter) {
     ${outgoing ? fact('Our reference', `<span class="mono">${esc(letter.our_reference)}</span>`) : fact('Register number', `<span class="mono">${esc(letter.reference)}</span>`)}
     ${fact(outgoing ? 'Created' : 'Date registered', esc(fmtDateTime(letter.created_at)))}
     ${fact('Subject', esc(letter.subject))}
-    ${outgoing ? fact('Addressee', letter.addressee ? esc(letter.addressee) : '—') : ''}
+    ${outgoing ? fact('Addressee', letter.addressee ? `${esc(letter.addressee)}${letter.addressee_title ? `<br><span class="sub">${esc(letter.addressee_title)}</span>` : ''}` : '—') : ''}
     ${fact(outgoing ? 'To institution' : 'From institution', esc(letter.sender))}
     ${outgoing ? fact('Address', lines(letter.recipient_address)) : ''}
     ${outgoing ? '' : fact('Received via', esc(RECEIVED_VIA[letter.received_via] || '—'))}
     ${outgoing ? '' : fact('Date received', esc(fmtDate(letter.received_date)))}
     ${outgoing ? '' : fact('Date on letter', letter.letter_date ? esc(fmtDate(letter.letter_date)) : '—')}
     ${fact(outgoing ? 'Their reference' : 'Reference on letter', letter.agency_reference ? `<span class="mono">${esc(letter.agency_reference)}</span>` : '—')}
-    ${outgoing ? '' : fact('Signed by', letter.signatory ? esc(letter.signatory) : '—')}
+    ${outgoing ? '' : fact('Signed by', letter.signatory ? `${esc(letter.signatory)}${letter.signatory_title ? `<br><span class="sub">${esc(letter.signatory_title)}</span>` : ''}` : '—')}
     ${fact(outgoing ? 'Copied to' : 'Copied parties', lines(letter.cc_parties))}
   </dl></section>`;
 }
@@ -1127,7 +1159,7 @@ async function renderDetail(id) {
   const { letter, audit, responses, in_reply_to_letter: original, enclosures = [], comments = [], signatory = null, collaborators = [], may_manage_collaborators: mayManage = false } = await api(`/letters/${id}`);
   letter.collaborators = collaborators;
   letter.may_manage_collaborators = mayManage;
-  letter.signatory = signatory;
+  letter.signer = signatory;
   letter.enclosure_list = enclosures;
   const outgoing = isOutgoing(letter);
   const panel = outgoing ? await outgoingPanel(letter, audit) : await incomingPanel(letter, responses);
@@ -1149,6 +1181,7 @@ async function renderDetail(id) {
   view.innerHTML = `
     <a class="back" href="#/${registerOf(letter)}">${icon('back')}Back to the ${outgoing ? 'outgoing' : 'incoming'} register</a>
     <div class="detail-head"><div style="min-width:0"><span class="row-sub">${outgoing ? `${icon('send', 'inline')} Outgoing · To ${letter.addressee ? `${esc(letter.addressee)}, ` : ''}${esc(letter.sender)}` : `${icon('inbox', 'inline')} Received · From ${esc(letter.sender)}`}</span><h2>${esc(letter.subject)}</h2>
+      <p class="ref-line">${outgoing ? `Our Ref <b class="mono">${esc(letter.our_reference || '')}</b>` : `Register <b class="mono">${esc(letter.reference)}</b>`}${letter.agency_reference ? ` · ${outgoing ? 'Your Ref' : 'Their Ref'} <b class="mono">${esc(letter.agency_reference)}</b>` : ''}</p>
       <div class="chips">${statusPills(letter)}${priorityChip(letter.priority)}${dueChip(letter)}${confChip(letter)}${outgoing ? '' : `<span class="chip">${esc(letter.category || 'General correspondence')}</span>`}</div></div></div>
     ${stepper(letter)}
     <div class="grid-2">
@@ -1161,20 +1194,13 @@ async function renderDetail(id) {
         ${enclosuresCard(letter, enclosures)}
         ${trackingCard(letter)}
         ${registerCard(letter)}
-        <section class="card"><div class="card-head"><h3>Handling</h3></div><dl class="facts">
-          ${fact('Department', esc(letter.department_name))}
-          ${fact(outgoing ? 'Written by' : 'Assigned to', letter.assignee_name ? esc(letter.assignee_name) : 'Not yet assigned')}
-          ${fact(outgoing ? 'Started by' : 'Registered by', esc(letter.created_by_name || '—'))}
-          ${outgoing ? '' : fact('Priority', esc(cap(letter.priority)))}
-          ${outgoing ? '' : fact('Confidentiality', esc(cap(letter.confidentiality)))}
-          ${letter.notes ? fact('Notes', esc(letter.notes)) : ''}
-        </dl></section>
+        ${peopleCard(letter, audit)}
         <section class="card"><div class="card-head"><div><h3>Letter folder</h3><p>Everything kept for this letter.</p></div><a class="btn btn-secondary btn-sm" href="/letters/${letter.id}/folder.zip" style="text-decoration:none">${icon('download')}Download all</a></div><div class="files">
           ${outgoing ? '' : `<a class="file-link" href="/letters/${letter.id}/source">${icon('file')}Original scan<small>${esc(letter.source_file)}</small></a>`}
           ${outgoing ? '' : `<a class="file-link" href="/letters/${letter.id}/editable">${icon('edit')}Text of the scan (Word)<small>.docx</small></a>`}
           ${outgoing && letter.has_word_draft ? `<a class="file-link" href="/letters/${letter.id}/response-docx">${icon('edit')}${letter.status === 'finalized' ? 'Approved Word copy' : 'Word copy of the draft'}<small>${esc(draftName(letter))}</small></a>` : ''}
           ${outgoing && letter.status === 'finalized' ? `<a class="file-link" href="/letters/${letter.id}/pdf">${icon('lock')}Final approved PDF<small>locked</small></a>` : ''}
-          ${letter.has_delivery_proof ? `<a class="file-link" href="/letters/${letter.id}/delivery-proof">${icon('check')}Proof of delivery<small>${esc(letter.delivery_proof_filename || '')}</small></a>` : ''}
+          ${letter.has_delivery_proof ? `<a class="file-link" href="/letters/${letter.id}/delivery-proof">${icon('check')}Stamped copy<small>${esc(letter.delivery_proof_filename || '')}</small></a>` : ''}
         </div></section>
         ${discussionCard(letter, comments)}
         <section class="card"><div class="card-head"><h3>History</h3></div>${timeline(audit, letter)}</section>
@@ -1212,11 +1238,13 @@ function editDetailsModal(letter) {
       <div class="form-grid">
         <label class="wide">Subject<input name="subject" value="${esc(letter.subject)}" required></label>
         ${outgoing ? field('addressee', 'Addressee') : ''}
+        ${outgoing ? field('addressee_title', 'Addressee’s title') : ''}
         <label class="${outgoing ? '' : 'wide'}">${outgoing ? 'To institution' : 'From institution'}<input name="sender" value="${esc(letter.sender)}" required></label>
         ${outgoing ? `<label class="wide">Address<textarea name="recipient_address" rows="2">${esc(letter.recipient_address || '')}</textarea></label>` : ''}
         ${outgoing ? '' : field('letter_date', 'Date on letter', 'date')}
         ${field('agency_reference', outgoing ? 'Their reference' : 'Reference on letter')}
         ${outgoing ? '' : field('signatory', 'Signed by')}
+        ${outgoing ? '' : field('signatory_title', 'Signer’s title')}
         ${outgoing ? '' : field('received_date', 'Date received', 'date')}
         ${outgoing ? '' : `<label>Received via<select name="received_via"><option value="">Not set</option>${Object.entries(RECEIVED_VIA).map(([k, v]) => `<option value="${k}" ${letter.received_via === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>`}
         <label class="wide">${outgoing ? 'Copied to' : 'Copied parties'}<textarea name="cc_parties" rows="3">${esc(letter.cc_parties || '')}</textarea></label>
@@ -1380,9 +1408,20 @@ function bindActions(letter) {
       data.append('outcome', $('#v-outcome').value);
       data.append('delivered_on', $('#v-date').value);
       data.append('note', $('#v-note').value);
-      if ($('#v-close').checked) data.append('close', '1');
+      if ($('#v-close').checked && ($('#v-proof').files[0] || letter.has_delivery_proof)) data.append('close', '1');
       if ($('#v-proof').files[0]) data.append('proof', $('#v-proof').files[0]);
       return form(button, `/letters/${letter.id}/delivery`, data, $('#v-outcome').value === 'delivered' ? 'Delivery recorded.' : 'Recorded as returned. It can be sent again.');
+    }
+    if (act === 'proof-upload') {
+      const proof = $('#v-proof').files[0];
+      if (!proof) { toast('Choose the scanned stamped copy first.', 'error'); return; }
+      const data = new FormData();
+      data.append('outcome', 'delivered');
+      data.append('delivered_on', letter.delivered_on || today());
+      data.append('note', letter.delivery_note || '');
+      data.append('close', '1');
+      data.append('proof', proof);
+      return form(button, `/letters/${letter.id}/delivery`, data, 'Stamped copy saved. The letter is closed.');
     }
     if (act === 'tracking') {
       const payload = { matter_status: $('#m-status').value, remarks: $('#m-remarks').value, due_date: $('#m-due').value };
@@ -1410,7 +1449,8 @@ function renderIntake() {
         <label class="wide">Institute / organisation name on letter *<input name="sender" required placeholder="e.g. Ministry of Finance" autocomplete="off"></label>
         <label>Date on letter<input name="letter_date" type="date" max="${todayISO()}"></label>
         <label>Reference number on letter<input name="agency_reference" placeholder="e.g. MOF/TAX/2026/118" autocomplete="off"></label>
-        <label>Name of signer<input name="signatory" placeholder="Who signed the letter" autocomplete="off"></label>
+        <label>Name of signer *<input name="signatory" required placeholder="Who signed the letter" autocomplete="off"></label>
+        <label>Signer’s title / position<input name="signatory_title" placeholder="e.g. Chief Director" autocomplete="off"></label>
         <label>Date received *<input name="received_date" type="date" required value="${todayISO()}" max="${todayISO()}"></label>
         <label>Received via<select name="received_via">${Object.entries(RECEIVED_VIA).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></label>
         <label>Category<select name="category">${CATEGORIES.map((c) => `<option>${esc(c)}</option>`).join('')}</select></label>
@@ -1463,7 +1503,7 @@ function renderIntake() {
     event.preventDefault();
     const form = event.target;
     if (!file) { toast('Add the scanned letter first.', 'error'); return; }
-    const missing = ['sender', 'subject', 'received_date', 'department_id'].find((name) => !form.elements[name].value.trim());
+    const missing = ['sender', 'subject', 'signatory', 'received_date', 'department_id'].find((name) => !form.elements[name].value.trim());
     if (missing) { form.elements[missing].focus(); toast('Fill in the required fields marked *.', 'error'); return; }
     const fields = Object.fromEntries(new FormData(form));
     const button = $('#intake-submit');
@@ -1536,7 +1576,8 @@ async function renderCompose(params) {
         ${answerable.length ? `<label class="wide">In reply to <span class="hint">(optional)</span><select name="in_reply_to"><option value="">Nothing: a new letter</option>${answerable.map((l) => `<option value="${l.id}">${esc(l.reference)} · ${esc(l.subject)} (${esc(l.sender)})</option>`).join('')}</select></label>` : ''}
         <p class="form-section-title">Who it is going to</p>
         <label>Institution / organisation *<input name="recipient" required placeholder="e.g. Ministry of Finance" autocomplete="off"></label>
-        <label>Addressee<input name="addressee" placeholder="e.g. The Chief Director" autocomplete="off"></label>
+        <label>Addressee *<input name="addressee" required placeholder="Who should receive it and reply, e.g. Mr K. Mensah" autocomplete="off"></label>
+        <label>Addressee’s title / position<input name="addressee_title" placeholder="e.g. Chief Director" autocomplete="off"></label>
         <label class="wide"><span>Address <span class="hint">(optional, one line each)</span></span><textarea name="recipient_address" rows="2" placeholder="P.O. Box M40&#10;Accra"></textarea></label>
         <label><span>Their reference <span class="hint">(optional)</span></span><input name="agency_reference" autocomplete="off"></label>
         <label class="wide"><span>Copy to <span class="hint">(one per line, printed as cc)</span></span><textarea name="cc_parties" rows="2"></textarea></label>
@@ -1587,6 +1628,7 @@ async function renderCompose(params) {
     form.elements.recipient.value = original.sender;
     form.elements.subject.value = original.subject;
     form.elements.addressee.value = original.signatory || '';
+    form.elements.addressee_title.value = original.signatory_title || '';
     form.elements.agency_reference.value = original.agency_reference || '';
     if (choosesDept) { form.elements.department_id.value = original.department_id; drawWriter(); }
   };
@@ -1609,7 +1651,7 @@ async function renderCompose(params) {
   preview();
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const missing = ['subject', 'recipient', ...(choosesDept ? ['department_id'] : [])].find((name) => !form.elements[name].value.trim());
+    const missing = ['subject', 'recipient', 'addressee', ...(choosesDept ? ['department_id'] : [])].find((name) => !form.elements[name].value.trim());
     if (missing) { form.elements[missing].focus(); toast('Fill in the required fields marked *.', 'error'); return; }
     await busy($('#compose-submit'), async () => {
       try {

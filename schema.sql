@@ -75,6 +75,8 @@ CREATE TABLE IF NOT EXISTS letters (
     delivery_proof_filename TEXT,
     body_html TEXT,
     signatory_id INTEGER REFERENCES users(id),
+    signatory_title TEXT,
+    addressee_title TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

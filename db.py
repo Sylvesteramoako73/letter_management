@@ -167,6 +167,8 @@ def initialize(connection) -> None:
         "delivery_proof_filename": "TEXT",
         "body_html": "TEXT",
         "signatory_id": "INTEGER REFERENCES users(id)",
+        "signatory_title": "TEXT",
+        "addressee_title": "TEXT",
     }
     for name, definition in migrations.items():
         if name not in columns:

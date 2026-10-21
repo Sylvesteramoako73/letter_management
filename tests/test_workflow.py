@@ -70,7 +70,7 @@ def test_full_workflow_creates_locked_pdf_and_audit(client):
         json={
             "sender": "Lands Commission",
             "subject": "Planning notice",
-            "received_date": "2026-09-19",
+            "signatory": "K. Mensah", "received_date": "2026-09-19",
             "department_id": department_id,
             "source_file": "scan.pdf",
             "content": "scanned letter bytes",
@@ -120,7 +120,7 @@ def test_unauthorized_roles_cannot_intake_or_approve(client):
         json={
             "sender": "Agency",
             "subject": "Blocked",
-            "received_date": "2026-09-19",
+            "signatory": "K. Mensah", "received_date": "2026-09-19",
             "department_id": department_id,
             "source_file": "scan.pdf",
             "content": "x",
@@ -136,7 +136,7 @@ def test_upload_and_admin_are_role_protected(client):
         data={
             "sender": "Agency",
             "subject": "Uploaded scan",
-            "received_date": "2026-09-19",
+            "signatory": "K. Mensah", "received_date": "2026-09-19",
             "department_id": str(department_id),
             "document": (io.BytesIO(b"%PDF-1.4"), "scan.pdf"),
         },
@@ -164,7 +164,7 @@ def test_upload_generates_editable_word_and_departments_can_be_routed(client):
         data={
             "sender": "Agency",
             "subject": "Finance scan",
-            "received_date": "2026-09-19",
+            "signatory": "K. Mensah", "received_date": "2026-09-19",
             "department_id": str(target["id"]),
             "document": (io.BytesIO(b"%PDF-1.4"), "finance.pdf"),
         },
@@ -197,7 +197,7 @@ def test_intake_details_notifications_and_search(client):
         data={
             "sender": "Korle Bay Construction",
             "subject": "Request for quotation",
-            "received_date": "2026-09-24",
+            "signatory": "K. Mensah", "received_date": "2026-09-24",
             "department_id": str(department_id),
             "priority": "urgent",
             "due_date": "2026-10-10",
@@ -250,7 +250,7 @@ def test_invalid_intake_details_are_rejected(client):
         data={
             "sender": "Agency",
             "subject": "Bad priority",
-            "received_date": "2026-09-24",
+            "signatory": "K. Mensah", "received_date": "2026-09-24",
             "department_id": str(department_id),
             "priority": "whenever",
             "document": (io.BytesIO(b"%PDF-1.4"), "scan.pdf"),
@@ -268,7 +268,7 @@ def test_md_can_approve_directly_at_any_stage(client):
         data={
             "sender": "Agency",
             "subject": "Needs the MD today",
-            "received_date": "2026-09-24",
+            "signatory": "K. Mensah", "received_date": "2026-09-24",
             "department_id": str(department_id),
             "document": (io.BytesIO(b"%PDF-1.4"), "scan.pdf"),
         },

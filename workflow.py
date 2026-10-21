@@ -50,9 +50,12 @@ DISPATCH_METHODS = {"hand_delivery", "dispatch_rider", "courier", "post", "email
 DELIVERY_OUTCOMES = {"delivered", "returned"}
 # Entered once; afterwards only the MD or MD PA may correct them.
 INCOMING_REGISTER_FIELDS = (
-    "sender", "subject", "letter_date", "agency_reference", "signatory", "cc_parties", "received_date", "received_via",
+    "sender", "subject", "letter_date", "agency_reference", "signatory", "signatory_title", "cc_parties", "received_date",
+    "received_via",
 )
-OUTGOING_REGISTER_FIELDS = ("sender", "subject", "addressee", "recipient_address", "agency_reference", "cc_parties")
+OUTGOING_REGISTER_FIELDS = (
+    "sender", "subject", "addressee", "addressee_title", "recipient_address", "agency_reference", "cc_parties",
+)
 DRAFTING_STATUSES = {"in_progress", "changes_requested"}
 OPEN_INCOMING_STATUSES = {"intake", "assigned", "in_progress"}
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -236,6 +239,7 @@ def _clean_details(details) -> dict:
         "notes": _text(details.get("notes")),
         "letter_date": _clean_date(details.get("letter_date"), "Date on letter"),
         "signatory": _text(details.get("signatory")),
+        "signatory_title": _text(details.get("signatory_title")),
         "cc_parties": _text(details.get("cc_parties")),
         "received_via": _clean_choice(details.get("received_via"), RECEIVED_VIA, "Received via"),
         "action_required": _clean_choice(details.get("action_required"), ACTIONS_REQUIRED, "Action required"),
@@ -283,6 +287,8 @@ def create_letter(actor, sender, subject, received_date, department_id, source_f
         raise Forbidden("You are not allowed to register incoming letters")
     validate_source_file(source_file, len(content))
     extra = _clean_details(details)
+    if not extra["signatory"]:
+        raise BadRequest("Enter the name of the person who signed the letter")
     digest = hashlib.sha256(content).hexdigest()
     connection = connect()
     try:
@@ -309,8 +315,8 @@ def create_letter(actor, sender, subject, received_date, department_id, source_f
                  source_sha256, source_document, source_storage_path,
                  editable_document, editable_filename, department_id, status, created_by,
                  agency_reference, category, priority, confidentiality, due_date, notes,
-                 letter_date, signatory, cc_parties, received_via, action_required)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'intake', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 letter_date, signatory, cc_parties, received_via, action_required, signatory_title)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'intake', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             """,
             (
@@ -337,6 +343,7 @@ def create_letter(actor, sender, subject, received_date, department_id, source_f
                 extra["cc_parties"],
                 extra["received_via"],
                 extra["action_required"],
+                extra["signatory_title"],
             ),
         ).fetchone()["id"]
         _audit(connection, letter_id, actor["id"], "intake_created", None, "intake")
@@ -510,6 +517,8 @@ def set_tracking(actor, letter_id: int, payload: dict):
             valid = {"open", "closed"} if is_outgoing(letter) else MATTER_STATUSES
             if matter_status not in valid:
                 raise BadRequest("Status must be " + (" or ".join(sorted(valid))))
+            if matter_status == "closed" and letter["matter_status"] != "closed":
+                _require_closable(connection, letter)
             changes["matter_status"] = matter_status
         if "remarks" in payload:
             changes["status_remarks"] = _text(payload.get("remarks"))
@@ -530,6 +539,8 @@ def set_tracking(actor, letter_id: int, payload: dict):
             if changed.get("status_remarks"):
                 details["details"] = changed["status_remarks"]
             _audit(connection, letter_id, actor["id"], "tracking_updated", letter["status"], letter["status"], details)
+            if changed.get("matter_status") == "closed" and is_outgoing(letter):
+                _close_answered_letter(connection, actor, letter)
             connection.commit()
         return _get_letter(connection, letter_id)
     finally:
@@ -629,8 +640,8 @@ def _insert_outgoing(connection, actor, fields, writer_id) -> int:
             (reference, our_reference, direction, sender, subject, received_date,
              source_file, source_sha256, source_document, department_id, status,
              created_by, assigned_to, agency_reference, cc_parties, due_date,
-             addressee, recipient_address, in_reply_to, priority, confidentiality, notes, signatory_id)
-        VALUES (?, ?, 'outgoing', ?, ?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             addressee, recipient_address, in_reply_to, priority, confidentiality, notes, signatory_id, addressee_title)
+        VALUES (?, ?, 'outgoing', ?, ?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -654,6 +665,7 @@ def _insert_outgoing(connection, actor, fields, writer_id) -> int:
             fields.get("confidentiality") or "internal",
             fields.get("notes"),
             fields.get("signatory_id"),
+            fields.get("addressee_title"),
         ),
     ).fetchone()["id"]
     letter = _get_letter(connection, letter_id)
@@ -730,6 +742,7 @@ def _respond(connection, actor, incoming):
             "department_id": incoming["department_id"],
             "agency_reference": incoming["agency_reference"],
             "addressee": incoming["signatory"],
+            "addressee_title": incoming["signatory_title"],
             "due_date": incoming["due_date"],
             "in_reply_to": incoming["id"],
             "priority": incoming["priority"],
@@ -787,6 +800,8 @@ def create_outgoing(actor, payload: dict):
     subject = _text(payload.get("subject"))
     if not recipient or not subject:
         raise BadRequest("Recipient institution and subject are required")
+    if not _text(payload.get("addressee")):
+        raise BadRequest("Enter who the letter is addressed to")
     # Department staff send from their own department; the front desk, MD and MD PA choose one.
     own_department = actor["role"] in {"team_member", "department_head"}
     department_id = actor["department_id"] if own_department else _int_or_none(payload.get("department_id"), "Choose the department sending the letter")
@@ -801,6 +816,7 @@ def create_outgoing(actor, payload: dict):
         "agency_reference": _text(payload.get("agency_reference")),
         "cc_parties": _text(payload.get("cc_parties")),
         "addressee": _text(payload.get("addressee")),
+        "addressee_title": _text(payload.get("addressee_title")),
         "recipient_address": _text(payload.get("recipient_address")),
         "due_date": _clean_date(payload.get("due_date"), "Due date"),
         "notes": _text(payload.get("notes")),
@@ -972,7 +988,7 @@ def word_copy(actor, letter_id: int):
         return name, letter["response_document"]
     if not letter["body_html"]:
         raise NotFound("There is no letter to download yet")
-    return name, letterhead.html_to_docx(letter["our_reference"], letter["body_html"] + closing)
+    return name, letterhead.html_to_docx(letter["our_reference"], letter["body_html"] + closing, their_reference=letter["agency_reference"])
 
 
 def _require_written(letter) -> None:
@@ -1142,9 +1158,12 @@ def _final_pdf(connection, letter, approver) -> bytes:
         for sheet in document:
             # The letterhead goes underneath, so the printed letter is the company's own artwork.
             sheet.show_pdf_page(sheet.rect, paper, 0, overlay=False)
+            corner = "<br/>".join(
+                f"{label}<b>{escape(value)}</b>" for label, value in letterhead.reference_lines(our_reference, letter["agency_reference"])
+            )
             sheet.insert_htmlbox(
                 pymupdf.Rect(*letterhead.REFERENCE_AREA),
-                f'<p style="text-align:right;font-family:sans-serif;font-size:9pt;color:#333">Our Ref: <b>{escape(our_reference)}</b></p>',
+                f'<p style="text-align:right;font-family:sans-serif;font-size:9pt;line-height:1.35;color:#333">{corner}</p>',
             )
     document.set_metadata({"title": f"{our_reference} - {letter['subject']}", "author": "Swami India Ghana Limited"})
     # Locked by the digital signature in _finalize rather than by a password.
@@ -1173,6 +1192,7 @@ def _finalize(connection, letter, actor) -> None:
         approved = letterhead.html_to_docx(
             letter["our_reference"], letter["body_html"] + letter_closing(connection, letter, signatory(connection, letter, actor)),
             f"Approved by {actor['display_name']} on {approved_on}. Reference {letter['our_reference']}.",
+            their_reference=letter["agency_reference"],
         )
         connection.execute("UPDATE letters SET response_document = ?, response_filename = ? WHERE id = ?", (approved, file_name, letter_id))
         _version(connection, letter_id, actor["id"], "final", approved, file_name, "Approved Word document")
@@ -1323,6 +1343,42 @@ def record_dispatch(actor, letter_id: int, method: str, sent_on: str | None, not
         connection.close()
 
 
+def _require_closable(connection, letter) -> None:
+    """A letter is closed only on proof: the stamped or signed copy of what we sent.
+
+    A sent letter needs its own proof; a received letter that was answered needs proof for every reply.
+    A received letter that needed no reply can be closed as it is.
+    """
+    if is_outgoing(letter):
+        if not letter["delivery_proof"]:
+            raise BadRequest("Upload the stamped or signed copy of this letter before closing it")
+        return
+    missing = connection.execute(
+        "SELECT our_reference FROM letters WHERE in_reply_to = ? AND delivery_proof IS NULL", (letter["id"],)
+    ).fetchall()
+    if missing:
+        references = ", ".join(row["our_reference"] for row in missing)
+        raise BadRequest(f"Close it once the stamped copy of the reply is uploaded ({references})")
+
+
+def _close_answered_letter(connection, actor, reply) -> None:
+    """When a reply is closed on its stamped copy, the letter it answered is closed too, if nothing else is pending."""
+    if not reply["in_reply_to"]:
+        return
+    incoming = _get_letter(connection, reply["in_reply_to"])
+    if incoming["matter_status"] == "closed":
+        return
+    pending = connection.execute(
+        "SELECT 1 FROM letters WHERE in_reply_to = ? AND id != ? AND delivery_proof IS NULL", (incoming["id"], reply["id"])
+    ).fetchone()
+    if pending:
+        return
+    connection.execute("UPDATE letters SET matter_status = 'closed', updated_at = ? WHERE id = ?", (utc_now(), incoming["id"]))
+    _audit(connection, incoming["id"], actor["id"], "tracking_updated", incoming["status"], incoming["status"],
+           {"changes": {"matter_status": {"from": incoming["matter_status"], "to": "closed"}}, "from": incoming["matter_status"],
+            "to": "closed", "details": f"Closed with the stamped copy of {reply['our_reference']}"})
+
+
 def record_delivery(actor, letter_id: int, outcome: str, delivered_on: str | None, note: str | None, close: bool = False, proof=None):
     """Delivery confirmation, with an optional scan of the stamped or signed copy."""
     outcome = _clean_choice(outcome, DELIVERY_OUTCOMES, "Delivery outcome")
@@ -1342,6 +1398,8 @@ def record_delivery(actor, letter_id: int, outcome: str, delivered_on: str | Non
         if letter["dispatch_status"] not in {"sent", "delivered", "returned"}:
             raise Forbidden("Record how the letter was sent first")
         closing = close and outcome == "delivered"
+        if closing and not (proof or letter["delivery_proof"]):
+            raise BadRequest("Upload the stamped or signed copy to close the letter")
         connection.execute(
             f"""
             UPDATE letters
@@ -1361,6 +1419,8 @@ def record_delivery(actor, letter_id: int, outcome: str, delivered_on: str | Non
             letter["status"],
             {"outcome": outcome, "date": delivered_on, "details": _text(note), "closed": closing, "proof": bool(proof)},
         )
+        if closing:
+            _close_answered_letter(connection, actor, letter)
         if letter["assigned_to"] and letter["assigned_to"] != actor["id"]:
             title = "Letter delivered" if outcome == "delivered" else "Letter returned undelivered"
             _notify(connection, letter["assigned_to"], letter_id, "delivery", title, f"{letter['our_reference']}: {title.lower()} on {delivered_on}.")

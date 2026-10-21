@@ -1,6 +1,7 @@
 import io
 import zipfile
 
+import pymupdf
 from docx import Document
 
 from test_workflow import client, head_approves, login, respond  # noqa: F401  (pytest fixture)
@@ -48,7 +49,7 @@ def test_register_fields_are_locked_except_for_admins(client):
     login(client, "frontdesk")
     bad = client.post(
         "/letters/upload",
-        data={"sender": "A", "subject": "B", "received_date": "2026-10-10", "department_id": str(department_id),
+        data={"sender": "A", "subject": "B", "signatory": "K. Mensah", "received_date": "2026-10-10", "department_id": str(department_id),
               "received_via": "pigeon", "document": (io.BytesIO(b"%PDF-1.4"), "scan.pdf")},
         content_type="multipart/form-data",
     )
@@ -191,13 +192,13 @@ def test_new_letter_can_answer_a_received_letter(client):
     letter = register(client, department_id)
     login(client, "member")
     assert client.post(
-        "/letters/outgoing", json={"recipient": "Ministry of Finance", "subject": "Follow-up", "in_reply_to": letter["id"]}
+        "/letters/outgoing", json={"addressee": "The Director", "recipient": "Ministry of Finance", "subject": "Follow-up", "in_reply_to": letter["id"]}
     ).status_code == 403
     login(client, "head")
     client.post(f"/letters/{letter['id']}/assign", json={"assignee_id": users["member"]})
     login(client, "member")
     reply = client.post(
-        "/letters/outgoing", json={"recipient": "Ministry of Finance", "subject": "Follow-up", "in_reply_to": letter["id"]}
+        "/letters/outgoing", json={"addressee": "The Director", "recipient": "Ministry of Finance", "subject": "Follow-up", "in_reply_to": letter["id"]}
     ).get_json()
     assert reply["in_reply_to"] == letter["id"]
     detail = client.get(f"/letters/{reply['id']}").get_json()
@@ -219,17 +220,17 @@ def test_our_reference_serial_counts_per_institute(client):
     assert client.post(f"/letters/{first['id']}/respond").get_json()["our_reference"] == "SIGL/MOF/AD/0001"
 
     login(client, "financeandaccountsmember")
-    created = client.post("/letters/outgoing", json={"recipient": "Ministry of Finance", "subject": "Payment schedule"}).get_json()
+    created = client.post("/letters/outgoing", json={"addressee": "The Director", "recipient": "Ministry of Finance", "subject": "Payment schedule"}).get_json()
     assert created["our_reference"] == "SIGL/MOF/AC/0002"
     assert created["department_id"] == finance["id"]
     assert created["assigned_to"] == users["financeandaccountsmember"]
     assert client.get(f"/letters/{created['id']}/source").status_code == 404
-    other = client.post("/letters/outgoing", json={"recipient": "Lands Commission", "subject": "Site visit"}).get_json()
+    other = client.post("/letters/outgoing", json={"addressee": "The Director", "recipient": "Lands Commission", "subject": "Site visit"}).get_json()
     assert other["our_reference"] == "SIGL/LC/AC/0001"
 
     login(client, "frontdesk")
     # The front desk can register a letter to be sent, but must say which department sends it.
-    assert client.post("/letters/outgoing", json={"recipient": "A", "subject": "B"}).status_code == 400
+    assert client.post("/letters/outgoing", json={"addressee": "The Director", "recipient": "A", "subject": "B"}).status_code == 400
 
 
 def test_tracking_status_remarks_action_and_deadline(client):
@@ -252,7 +253,7 @@ def test_tracking_status_remarks_action_and_deadline(client):
     assert client.get(f"/letters/{letter['id']}").get_json()["audit"][-1]["action"] == "tracking_updated"
 
     login(client, "member")
-    outgoing = client.post("/letters/outgoing", json={"recipient": "A", "subject": "B"}).get_json()
+    outgoing = client.post("/letters/outgoing", json={"addressee": "The Director", "recipient": "A", "subject": "B"}).get_json()
     assert client.post(f"/letters/{outgoing['id']}/matter-status", json={"matter_status": "responded"}).status_code == 400
 
 
@@ -279,7 +280,7 @@ def test_outgoing_line_mirrors_incoming(client):
     login(client, "frontdesk")
     created = client.post(
         "/letters/outgoing",
-        json={"recipient": "Lands Commission", "subject": "Site visit", "department_id": department_id,
+        json={"addressee": "The Director", "recipient": "Lands Commission", "subject": "Site visit", "department_id": department_id,
               "notes": "Ask for a visit next week", "priority": "high"},
     )
     assert created.status_code == 201
@@ -319,23 +320,23 @@ def test_outgoing_line_mirrors_incoming(client):
 def test_department_head_can_write_and_skips_own_review(client):
     client, department_id, users = client
     login(client, "frontdesk")
-    letter = client.post("/letters/outgoing", json={"recipient": "A", "subject": "B", "department_id": department_id}).get_json()
+    letter = client.post("/letters/outgoing", json={"addressee": "The Director", "recipient": "A", "subject": "B", "department_id": department_id}).get_json()
     login(client, "head")
     assert client.post(f"/letters/{letter['id']}/assign", json={"assignee_id": users["head"]}).get_json()["assigned_to"] == users["head"]
     client.put(f"/letters/{letter['id']}/response", json={"response_text": "Body"})
     assert client.post(f"/letters/{letter['id']}/submit").get_json()["status"] == "submitted_for_review"
 
     # A head can also name a team member as the writer when creating the letter.
-    created = client.post("/letters/outgoing", json={"recipient": "A", "subject": "C", "writer": str(users["member"])}).get_json()
+    created = client.post("/letters/outgoing", json={"addressee": "The Director", "recipient": "A", "subject": "C", "writer": str(users["member"])}).get_json()
     assert (created["status"], created["assigned_to"]) == ("in_progress", users["member"])
-    other_department = client.post("/letters/outgoing", json={"recipient": "A", "subject": "D", "writer": str(users["civilmember"])})
+    other_department = client.post("/letters/outgoing", json={"addressee": "The Director", "recipient": "A", "subject": "D", "writer": str(users["civilmember"])})
     assert other_department.status_code == 403
 
 
 def test_autosaves_merge_into_one_version_per_session(client):
     client, department_id, users = client
     login(client, "member")
-    letter = client.post("/letters/outgoing", json={"recipient": "A", "subject": "B"}).get_json()
+    letter = client.post("/letters/outgoing", json={"addressee": "The Director", "recipient": "A", "subject": "B"}).get_json()
     for text in ("First draft", "Second draft", "Third draft"):
         assert client.put(f"/letters/{letter['id']}/response", json={"body_html": f"<p>{text}</p>"}).status_code == 200
     detail = client.get(f"/letters/{letter['id']}").get_json()
@@ -352,7 +353,7 @@ def test_front_desk_writes_and_responds_like_everyone_else(client):
     client, department_id, users = client
     login(client, "frontdesk")
     own = client.post(
-        "/letters/outgoing", json={"recipient": "Lands Commission", "subject": "Site visit", "department_id": department_id, "writer": "self"}
+        "/letters/outgoing", json={"addressee": "The Director", "recipient": "Lands Commission", "subject": "Site visit", "department_id": department_id, "writer": "self"}
     ).get_json()
     assert (own["status"], own["assigned_to"]) == ("in_progress", users["frontdesk"])
     assert client.put(f"/letters/{own['id']}/response", json={"response_text": "Please receive our team."}).status_code == 200
@@ -368,3 +369,59 @@ def test_front_desk_writes_and_responds_like_everyone_else(client):
     # Responding needs both: seeing the letter and being allowed to write.
     login(client, "financeandaccountsmember")
     assert client.post(f"/letters/{letter['id']}/respond").status_code == 403
+
+
+def test_letters_close_only_on_the_stamped_copy(client):
+    client, department_id, users = client
+    letter = register(client, department_id, signatory_title="Chief Director")
+    assert letter["signatory_title"] == "Chief Director"
+    login(client, "head")
+    client.post(f"/letters/{letter['id']}/assign", json={"assignee_id": users["member"]})
+    login(client, "member")
+    reply = client.post(f"/letters/{letter['id']}/respond").get_json()
+    # The reply goes to whoever signed, and their reference sits under ours.
+    assert (reply["addressee"], reply["addressee_title"]) == ("K. Mensah", "Chief Director")
+    header = Document(io.BytesIO(client.get(f"/letters/{reply['id']}/response-docx").data)).sections[0].header
+    assert [p.text for p in header.paragraphs[1:3]] == ["Our Ref: SIGL/MOF/AD/0001", "Your Ref: MOF/TAX/22"]
+    assert "Your Ref" not in reply["body_html"] and "Chief Director" in reply["body_html"]
+    client.put(f"/letters/{reply['id']}/response", json={"body_html": "<p>We confirm our tax status.</p>"})
+    approve_as_md(client, reply["id"])
+    page = pymupdf.open(stream=client.get(f"/letters/{reply['id']}/pdf").data, filetype="pdf")[0]
+    corner = page.get_text(clip=pymupdf.Rect(300, 120, 560, 170))
+    assert "Our Ref: SIGL/MOF/AD/0001" in corner and "Your Ref: MOF/TAX/22" in corner
+
+    login(client, "md")
+    # Neither letter closes before the stamped copy of the reply is in.
+    refused = client.post(f"/letters/{letter['id']}/matter-status", json={"matter_status": "closed"})
+    assert refused.status_code == 400 and "SIGL/MOF/AD/0001" in refused.get_json()["error"]
+    assert client.post(f"/letters/{reply['id']}/matter-status", json={"matter_status": "closed"}).status_code == 400
+    login(client, "frontdesk")
+    client.post(f"/letters/{reply['id']}/dispatch", json={"method": "dispatch_rider"})
+    no_proof = client.post(f"/letters/{reply['id']}/delivery", data={"outcome": "delivered", "close": "1"})
+    assert no_proof.status_code == 400
+    delivered = client.post(f"/letters/{reply['id']}/delivery", data={"outcome": "delivered"}).get_json()
+    assert (delivered["dispatch_status"], delivered["matter_status"]) == ("delivered", "open")
+
+    # Uploading the stamped copy closes the reply and the letter it answered.
+    closed = client.post(
+        f"/letters/{reply['id']}/delivery",
+        data={"outcome": "delivered", "close": "1", "proof": (io.BytesIO(b"%PDF-1.4"), "stamped.pdf")},
+        content_type="multipart/form-data",
+    ).get_json()
+    assert (closed["matter_status"], closed["has_delivery_proof"]) == ("closed", True)
+    login(client, "md")
+    assert client.get(f"/letters/{letter['id']}").get_json()["letter"]["matter_status"] == "closed"
+
+
+def test_signer_and_addressee_are_required(client):
+    client, department_id, _ = client
+    login(client, "frontdesk")
+    missing = client.post(
+        "/letters/upload",
+        data={"sender": "A", "subject": "B", "received_date": "2026-10-10", "department_id": str(department_id),
+              "document": (io.BytesIO(b"%PDF-1.4"), "scan.pdf")},
+        content_type="multipart/form-data",
+    )
+    assert missing.status_code == 400 and "signed" in missing.get_json()["error"]
+    login(client, "member")
+    assert client.post("/letters/outgoing", json={"recipient": "A", "subject": "B"}).status_code == 400
