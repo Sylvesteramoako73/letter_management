@@ -780,7 +780,6 @@ def create_app(test_config=None):
             request.form.get("outcome"),
             request.form.get("delivered_on"),
             request.form.get("note"),
-            close=request.form.get("close") in {"1", "true", "on"},
             proof=proof,
         )
         return jsonify(public_letter(letter))

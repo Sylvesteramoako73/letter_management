@@ -722,7 +722,7 @@ function describeEvent(event, letter) {
     approved_and_finalized: ['lock', 'green', `Approved and locked by ${who}${details.word_copy_deleted ? ' · editable draft deleted' : details.word_copy_kept ? ' · approved Word copy kept' : ''}`],
     md_override: ['alert', 'wine', `MD override by ${who}: skipped from “${esc(STATUS[details.skipped_from] || details.skipped_from || 'an earlier stage')}”`],
     dispatched: ['send', 'blue', `Sent by ${esc(DISPATCH_METHODS[details.method] || details.method)} on ${esc(fmtDate(details.sent_on))} · recorded by ${who}`],
-    delivery_recorded: ['check', details.outcome === 'delivered' ? 'green' : 'red', `${details.outcome === 'delivered' ? 'Delivered' : 'Returned undelivered'} on ${esc(fmtDate(details.date))} · recorded by ${who}${details.closed ? ' · correspondence closed' : ''}`],
+    delivery_recorded: ['check', details.outcome === 'delivered' ? 'green' : 'red', `${details.outcome === 'delivered' ? 'Delivered' : 'Returned undelivered'} on ${esc(fmtDate(details.date))} · recorded by ${who}${details.proof ? ' · stamped copy uploaded' : ''}${details.closed ? ' · correspondence closed' : ''}`],
     tracking_updated: ['check', '', `Tracking updated by ${who}: ${esc(Object.keys(details.changes || {}).map((f) => ({ matter_status: `status ${MATTER[details.to] || details.to}`, status_remarks: 'remarks', action_required: 'action required', due_date: 'deadline' }[f] || f)).join(', '))}`],
     collaborator_added: ['users', 'blue', `${esc(details.collaborator || '')} brought in by ${who}`],
     collaborator_removed: ['x', '', `${esc(details.collaborator || '')} taken off by ${who}`],
@@ -893,16 +893,15 @@ function dispatchPanel(letter) {
       <label>Date<input id="v-date" type="date" value="${today()}" max="${today()}"></label></div>
       <label><span>Received by / note <span class="hint">(optional)</span></span><input id="v-note" placeholder="e.g. Received by A. Owusu, Registry" autocomplete="off"></label>
       <label><span>Stamped or signed copy <span class="hint">(scan as PDF, PNG or JPG; needed to close the letter)</span></span><input id="v-proof" type="file" accept=".pdf,.png,.jpg,.jpeg"></label>
-      <label class="check"><input id="v-close" type="checkbox" checked> Close this correspondence once delivered</label>
-      <p class="hint-text">Without the stamped copy, the delivery is recorded and the letter stays open until the copy is uploaded.</p>
+      <p class="hint-text">Once the stamped copy is uploaded, mark the letter Closed under Status &amp; remarks.</p>
       <div class="btn-row"><button class="btn btn-success" data-act="delivery">${icon('check')}Record delivery</button></div>${files}`, 'Delivery');
   }
   return card(status === 'delivered' ? 'Delivered' : DISPATCH[status] || 'Approved', status === 'delivered' ? `Delivered on ${fmtDate(letter.delivered_on)}.` : '', `${sentLine}
     ${letter.delivery_note ? `<p class="fact-line">${icon('check', 'inline')} ${esc(letter.delivery_note)}</p>` : ''}
     ${letter.has_delivery_proof ? `<div class="btn-row"><a class="btn btn-secondary btn-sm" href="/letters/${letter.id}/delivery-proof" style="text-decoration:none">${icon('download')}Stamped copy</a></div>`
-      : status === 'delivered' ? `<div class="feedback"><strong>Stamped copy still needed</strong>Upload the scanned stamped or signed copy to close this letter.</div>
+      : status === 'delivered' ? `<div class="feedback"><strong>Stamped copy still needed</strong>Upload the scanned stamped or signed copy. The letter can be closed once it is in.</div>
         <label><span>Stamped or signed copy <span class="hint">(PDF, PNG or JPG)</span></span><input id="v-proof" type="file" accept=".pdf,.png,.jpg,.jpeg"></label>
-        <div class="btn-row"><button class="btn btn-success" data-act="proof-upload">${icon('upload')}Upload and close</button></div>` : ''}${files}`, letter.has_delivery_proof ? 'Complete' : 'Delivery');
+        <div class="btn-row"><button class="btn btn-success" data-act="proof-upload">${icon('upload')}Upload stamped copy</button></div>` : ''}${files}`, letter.has_delivery_proof ? 'Complete' : 'Delivery');
 }
 
 function trackingCard(letter) {
@@ -919,7 +918,7 @@ function trackingCard(letter) {
         <label>${outgoing ? 'Send by' : 'Deadline'}<input id="m-due" type="date" value="${esc(letter.due_date || '')}"></label>
       </div>
       ${outgoing ? '' : `<label>Action required<select id="m-action"><option value="">Not set</option>${Object.entries(ACTIONS).map(([k, v]) => `<option value="${k}" ${letter.action_required === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>`}
-      <p class="hint-text">${icon('lock', 'inline')} ${outgoing ? 'Closes only once the stamped or signed copy is uploaded.' : 'If we replied, it closes once the stamped copy of the reply is uploaded.'}</p>
+      <p class="hint-text">${icon('lock', 'inline')} ${state.user.role === 'md' ? 'As MD you can open or close it at any time.' : outgoing ? 'Can be marked Closed once the stamped or signed copy is uploaded.' : 'If we replied, it can be marked Closed once the stamped copy of the reply is uploaded.'}</p>
       <label><span>Remarks</span><textarea id="m-remarks" rows="2" placeholder="e.g. Waiting for the quotation from the supplier">${esc(letter.status_remarks || '')}</textarea></label>
       <div class="btn-row"><button class="btn btn-secondary" data-act="tracking">${icon('check')}Save</button></div>
     </div></section>`;
@@ -971,7 +970,7 @@ function holderOf(letter) {
   if (letter.matter_status === 'closed') return null;
   if (letter.status === 'finalized') {
     return { pending: 'Front desk, to dispatch it', returned: 'Front desk, to send it again', sent: 'In transit: waiting for delivery confirmation',
-      delivered: 'Front desk, to upload the stamped copy' }[letter.dispatch_status] || null;
+      delivered: letter.has_delivery_proof ? 'Waiting to be marked closed' : 'Front desk, to upload the stamped copy' }[letter.dispatch_status] || null;
   }
   return {
     intake: `${head}, to assign a writer`, in_progress: `${writer}, writing it`, changes_requested: `${writer}, revising it`,
@@ -1408,7 +1407,6 @@ function bindActions(letter) {
       data.append('outcome', $('#v-outcome').value);
       data.append('delivered_on', $('#v-date').value);
       data.append('note', $('#v-note').value);
-      if ($('#v-close').checked && ($('#v-proof').files[0] || letter.has_delivery_proof)) data.append('close', '1');
       if ($('#v-proof').files[0]) data.append('proof', $('#v-proof').files[0]);
       return form(button, `/letters/${letter.id}/delivery`, data, $('#v-outcome').value === 'delivered' ? 'Delivery recorded.' : 'Recorded as returned. It can be sent again.');
     }
@@ -1419,9 +1417,8 @@ function bindActions(letter) {
       data.append('outcome', 'delivered');
       data.append('delivered_on', letter.delivered_on || today());
       data.append('note', letter.delivery_note || '');
-      data.append('close', '1');
       data.append('proof', proof);
-      return form(button, `/letters/${letter.id}/delivery`, data, 'Stamped copy saved. The letter is closed.');
+      return form(button, `/letters/${letter.id}/delivery`, data, 'Stamped copy saved. Mark the letter Closed when ready.');
     }
     if (act === 'tracking') {
       const payload = { matter_status: $('#m-status').value, remarks: $('#m-remarks').value, due_date: $('#m-due').value };

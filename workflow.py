@@ -517,7 +517,7 @@ def set_tracking(actor, letter_id: int, payload: dict):
             valid = {"open", "closed"} if is_outgoing(letter) else MATTER_STATUSES
             if matter_status not in valid:
                 raise BadRequest("Status must be " + (" or ".join(sorted(valid))))
-            if matter_status == "closed" and letter["matter_status"] != "closed":
+            if matter_status == "closed" and letter["matter_status"] != "closed" and actor["role"] != "md":
                 _require_closable(connection, letter)
             changes["matter_status"] = matter_status
         if "remarks" in payload:
@@ -539,8 +539,6 @@ def set_tracking(actor, letter_id: int, payload: dict):
             if changed.get("status_remarks"):
                 details["details"] = changed["status_remarks"]
             _audit(connection, letter_id, actor["id"], "tracking_updated", letter["status"], letter["status"], details)
-            if changed.get("matter_status") == "closed" and is_outgoing(letter):
-                _close_answered_letter(connection, actor, letter)
             connection.commit()
         return _get_letter(connection, letter_id)
     finally:
@@ -1344,10 +1342,10 @@ def record_dispatch(actor, letter_id: int, method: str, sent_on: str | None, not
 
 
 def _require_closable(connection, letter) -> None:
-    """A letter is closed only on proof: the stamped or signed copy of what we sent.
+    """A letter is marked closed only on proof: the stamped or signed copy of what we sent.
 
     A sent letter needs its own proof; a received letter that was answered needs proof for every reply.
-    A received letter that needed no reply can be closed as it is.
+    A received letter that needed no reply can be closed as it is. The MD is not held to this.
     """
     if is_outgoing(letter):
         if not letter["delivery_proof"]:
@@ -1361,25 +1359,7 @@ def _require_closable(connection, letter) -> None:
         raise BadRequest(f"Close it once the stamped copy of the reply is uploaded ({references})")
 
 
-def _close_answered_letter(connection, actor, reply) -> None:
-    """When a reply is closed on its stamped copy, the letter it answered is closed too, if nothing else is pending."""
-    if not reply["in_reply_to"]:
-        return
-    incoming = _get_letter(connection, reply["in_reply_to"])
-    if incoming["matter_status"] == "closed":
-        return
-    pending = connection.execute(
-        "SELECT 1 FROM letters WHERE in_reply_to = ? AND id != ? AND delivery_proof IS NULL", (incoming["id"], reply["id"])
-    ).fetchone()
-    if pending:
-        return
-    connection.execute("UPDATE letters SET matter_status = 'closed', updated_at = ? WHERE id = ?", (utc_now(), incoming["id"]))
-    _audit(connection, incoming["id"], actor["id"], "tracking_updated", incoming["status"], incoming["status"],
-           {"changes": {"matter_status": {"from": incoming["matter_status"], "to": "closed"}}, "from": incoming["matter_status"],
-            "to": "closed", "details": f"Closed with the stamped copy of {reply['our_reference']}"})
-
-
-def record_delivery(actor, letter_id: int, outcome: str, delivered_on: str | None, note: str | None, close: bool = False, proof=None):
+def record_delivery(actor, letter_id: int, outcome: str, delivered_on: str | None, note: str | None, proof=None):
     """Delivery confirmation, with an optional scan of the stamped or signed copy."""
     outcome = _clean_choice(outcome, DELIVERY_OUTCOMES, "Delivery outcome")
     if not outcome:
@@ -1397,15 +1377,11 @@ def record_delivery(actor, letter_id: int, outcome: str, delivered_on: str | Non
         _require_dispatcher(actor, letter)
         if letter["dispatch_status"] not in {"sent", "delivered", "returned"}:
             raise Forbidden("Record how the letter was sent first")
-        closing = close and outcome == "delivered"
-        if closing and not (proof or letter["delivery_proof"]):
-            raise BadRequest("Upload the stamped or signed copy to close the letter")
         connection.execute(
             f"""
             UPDATE letters
             SET dispatch_status = ?, delivered_on = ?, delivery_note = ?, updated_at = ?
                 {", delivery_proof = ?, delivery_proof_filename = ?" if proof else ""}
-                {", matter_status = 'closed'" if closing else ""}
             WHERE id = ?
             """,
             (outcome, delivered_on, _text(note), utc_now(), *([proof[1], Path(proof[0]).name] if proof else []), letter_id),
@@ -1417,10 +1393,8 @@ def record_delivery(actor, letter_id: int, outcome: str, delivered_on: str | Non
             "delivery_recorded",
             letter["status"],
             letter["status"],
-            {"outcome": outcome, "date": delivered_on, "details": _text(note), "closed": closing, "proof": bool(proof)},
+            {"outcome": outcome, "date": delivered_on, "details": _text(note), "proof": bool(proof)},
         )
-        if closing:
-            _close_answered_letter(connection, actor, letter)
         if letter["assigned_to"] and letter["assigned_to"] != actor["id"]:
             title = "Letter delivered" if outcome == "delivered" else "Letter returned undelivered"
             _notify(connection, letter["assigned_to"], letter_id, "delivery", title, f"{letter['our_reference']}: {title.lower()} on {delivered_on}.")

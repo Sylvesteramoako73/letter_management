@@ -167,13 +167,13 @@ def test_new_letter_keeps_approved_word_and_tracks_dispatch_and_delivery(client)
     assert (sent.get_json()["dispatch_status"], sent.get_json()["dispatched_on"]) == ("sent", "2026-10-12")
     delivered = client.post(
         f"/letters/{letter['id']}/delivery",
-        data={"outcome": "delivered", "delivered_on": "2026-10-13", "note": "Received by A. Owusu", "close": "1",
+        data={"outcome": "delivered", "delivered_on": "2026-10-13", "note": "Received by A. Owusu",
               "proof": (io.BytesIO(b"%PDF-1.4"), "stamped.pdf")},
         content_type="multipart/form-data",
     )
     assert delivered.status_code == 200
     result = delivered.get_json()
-    assert (result["dispatch_status"], result["matter_status"], result["has_delivery_proof"]) == ("delivered", "closed", True)
+    assert (result["dispatch_status"], result["matter_status"], result["has_delivery_proof"]) == ("delivered", "open", True)
     assert client.get(f"/letters/{letter['id']}/delivery-proof").data == b"%PDF-1.4"
     assert client.post(f"/letters/{letter['id']}/dispatch", json={"method": "courier"}).status_code == 403
 
@@ -390,27 +390,39 @@ def test_letters_close_only_on_the_stamped_copy(client):
     corner = page.get_text(clip=pymupdf.Rect(300, 120, 560, 170))
     assert "Our Ref: SIGL/MOF/AD/0001" in corner and "Your Ref: MOF/TAX/22" in corner
 
-    login(client, "md")
-    # Neither letter closes before the stamped copy of the reply is in.
+    login(client, "head")
+    # Neither letter can be marked closed before the stamped copy of the reply is in.
     refused = client.post(f"/letters/{letter['id']}/matter-status", json={"matter_status": "closed"})
     assert refused.status_code == 400 and "SIGL/MOF/AD/0001" in refused.get_json()["error"]
     assert client.post(f"/letters/{reply['id']}/matter-status", json={"matter_status": "closed"}).status_code == 400
     login(client, "frontdesk")
     client.post(f"/letters/{reply['id']}/dispatch", json={"method": "dispatch_rider"})
-    no_proof = client.post(f"/letters/{reply['id']}/delivery", data={"outcome": "delivered", "close": "1"})
-    assert no_proof.status_code == 400
     delivered = client.post(f"/letters/{reply['id']}/delivery", data={"outcome": "delivered"}).get_json()
     assert (delivered["dispatch_status"], delivered["matter_status"]) == ("delivered", "open")
 
-    # Uploading the stamped copy closes the reply and the letter it answered.
-    closed = client.post(
+    # The stamped copy does not close anything by itself; closing is marked.
+    stamped = client.post(
         f"/letters/{reply['id']}/delivery",
-        data={"outcome": "delivered", "close": "1", "proof": (io.BytesIO(b"%PDF-1.4"), "stamped.pdf")},
+        data={"outcome": "delivered", "proof": (io.BytesIO(b"%PDF-1.4"), "stamped.pdf")},
         content_type="multipart/form-data",
     ).get_json()
-    assert (closed["matter_status"], closed["has_delivery_proof"]) == ("closed", True)
+    assert (stamped["matter_status"], stamped["has_delivery_proof"]) == ("open", True)
+    login(client, "head")
+    assert client.get(f"/letters/{letter['id']}").get_json()["letter"]["matter_status"] == "responded"
+    for letter_id in (reply["id"], letter["id"]):
+        closed = client.post(f"/letters/{letter_id}/matter-status", json={"matter_status": "closed"})
+        assert closed.status_code == 200 and closed.get_json()["matter_status"] == "closed"
+
+
+def test_md_opens_and_closes_any_letter(client):
+    client, department_id, _ = client
+    login(client, "member")
+    letter = client.post("/letters/outgoing", json={"addressee": "The Director", "recipient": "A", "subject": "B"}).get_json()
+    assert client.post(f"/letters/{letter['id']}/matter-status", json={"matter_status": "closed"}).status_code == 400
     login(client, "md")
-    assert client.get(f"/letters/{letter['id']}").get_json()["letter"]["matter_status"] == "closed"
+    for status in ("closed", "open", "closed"):
+        changed = client.post(f"/letters/{letter['id']}/matter-status", json={"matter_status": status})
+        assert changed.status_code == 200 and changed.get_json()["matter_status"] == status
 
 
 def test_signer_and_addressee_are_required(client):
