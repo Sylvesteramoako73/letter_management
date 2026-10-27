@@ -482,7 +482,7 @@ label.check input{width:auto}
 .editor-toolbar .ed-undo .icon,.editor-toolbar .ed-redo .icon{width:15px;height:15px;color:#444}
 .editor-toolbar .ed-redo .icon{transform:scaleX(-1)}
 .editor-desk{background:#eeeae8;padding:24px 16px;border-radius:0 0 var(--radius) var(--radius)}
-.editor-desk .paper{width:auto;max-width:640px;margin:0 auto;min-height:760px;padding:40px 48px;font-family:Calibri,Carlito,'Segoe UI',sans-serif;font-size:11pt;line-height:1.45;color:#111}
+.editor-desk .paper{width:auto;max-width:640px;margin:0 auto;min-height:760px;padding:40px 48px;font-family:'Times New Roman',Times,'Liberation Serif',serif;font-size:12pt;line-height:1.4;color:#111}
 .paper-head div{display:grid}
 .paper-head small{font-size:.62rem;font-style:italic;color:#666;font-weight:400}
 .editor-page .ql-container.ql-snow{border:0;font-family:inherit;font-size:inherit}
@@ -638,3 +638,40 @@ label.check input{width:auto}
 .ref-line{margin:4px 0 0;font-size:13px;color:var(--muted)}
 .ref-line b{color:var(--ink);font-weight:600}
 .lh-ref{line-height:1.4}
+
+/* Where letters are: Open, Drafting and Closed, then every stage, each opening the letters at it */
+.overview{display:grid;gap:14px;margin-bottom:22px}
+.overview-main{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.overview-tile{display:grid;gap:4px;padding:16px 18px;border:1px solid var(--line);border-radius:var(--radius);background:#fff;color:inherit;text-decoration:none}
+.overview-tile:hover{border-color:#d9c6c9;background:var(--wine-tint)}
+.overview-tile strong{font-size:1.6rem;line-height:1}
+.overview-tile span{color:var(--muted);font-size:.76rem}
+.overview-tile.tone-open strong{color:var(--blue)}
+.overview-tile.tone-drafting strong{color:var(--amber)}
+.overview-tile.tone-closed strong{color:var(--green)}
+.stage-strip{display:flex;flex-wrap:wrap;gap:8px}
+.stage-link{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border:1px solid var(--line);border-radius:20px;background:#fff;color:var(--ink);font-size:.76rem;text-decoration:none}
+.stage-link:hover{border-color:#d9c6c9;background:var(--wine-tint)}
+.stage-link b{font-weight:750}
+.stage-link.empty{opacity:.55}
+a.pill{text-decoration:none}
+a.pill:hover{filter:brightness(.95);text-decoration:underline}
+@media (max-width:620px){.overview-main{grid-template-columns:1fr}}
+
+/* Thread: every letter in the correspondence, in and out */
+.thread{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.thread-item{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff}
+.thread-item.current{border-color:var(--wine);background:var(--wine-tint)}
+.thread-item>.icon{flex:none;margin-top:2px;color:var(--wine)}
+.thread-item.in>.icon{color:var(--blue)}
+.thread-main{display:grid;gap:2px;min-width:0;flex:1}
+.thread-main a{color:var(--ink);text-decoration:none}
+.thread-main a:hover strong{text-decoration:underline}
+.thread-main small{color:var(--muted);font-size:.72rem}
+.thread-side{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex:none}
+.thread-link{display:grid;gap:8px;margin-top:4px}
+.thread-link summary{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:.8rem;font-weight:650;color:var(--wine)}
+.thread-link summary .icon{width:15px;height:15px}
+
+/* Someone else has the letter open in the editor */
+.editing-banner{display:flex;align-items:center;gap:10px;margin:0 20px 14px;padding:10px 14px;border-radius:9px;background:var(--amber-soft);color:var(--amber);font-size:.8rem;font-weight:600}

@@ -45,6 +45,14 @@ def login(client, username):
     assert response.status_code == 200
 
 
+def route_as_md(client, letter_id, department_id):
+    """Received letters go to the MD, who sends them on to a department."""
+    login(client, "md")
+    response = client.post(f"/letters/{letter_id}/route", json={"department_id": department_id})
+    assert response.status_code == 200, response.get_json()
+    return response.get_json()
+
+
 def respond(client, letter_id, text):
     """Press Respond on a received letter and write the reply body; returns the outgoing letter's id."""
     response = client.post(f"/letters/{letter_id}/respond")
@@ -78,6 +86,13 @@ def test_full_workflow_creates_locked_pdf_and_audit(client):
     )
     assert response.status_code == 201
     letter_id = response.get_json()["id"]
+    # The front desk cannot choose the department: the letter goes to the MD first.
+    assert response.get_json()["department_id"] is None
+    login(client, "head")
+    assert client.get(f"/letters/{letter_id}").status_code == 403
+    login(client, "md")
+    assert any(n["kind"] == "new_letter" and n["letter_id"] == letter_id for n in client.get("/notifications").get_json())
+    route_as_md(client, letter_id, department_id)
 
     login(client, "head")
     assert client.post(
@@ -109,7 +124,7 @@ def test_full_workflow_creates_locked_pdf_and_audit(client):
         f"/letters/{reply_id}/response", json={"response_text": "Tampered"}
     ).status_code == 403
     actions = [event["action"] for event in client.get(f"/letters/{letter_id}/audit").get_json()]
-    assert actions == ["intake_created", "assigned", "response_started", "response_approved"]
+    assert actions == ["intake_created", "routed_to_department", "assigned", "response_started", "response_approved"]
 
 
 def test_unauthorized_roles_cannot_intake_or_approve(client):
@@ -173,10 +188,14 @@ def test_upload_generates_editable_word_and_departments_can_be_routed(client):
     assert response.status_code == 201
     letter_id = response.get_json()["id"]
     assert client.get(f"/letters/{letter_id}/editable").status_code == 200
+    assert response.get_json()["department_id"] is None
     civil = next(department for department in departments if department["name"] == "Civil")
-    routed = client.post(f"/letters/{letter_id}/route", json={"department_id": civil["id"]})
-    assert routed.status_code == 200
-    assert routed.get_json()["department_id"] == civil["id"]
+    # Only the MD (or MD PA) sends a received letter on.
+    assert client.post(f"/letters/{letter_id}/route", json={"department_id": civil["id"]}).status_code == 403
+    assert route_as_md(client, letter_id, civil["id"])["department_id"] == civil["id"]
+    login(client, "mdpa")
+    routed = client.post(f"/letters/{letter_id}/route", json={"department_id": target["id"]})
+    assert routed.status_code == 200 and routed.get_json()["department_id"] == target["id"]
 
 
 def test_role_scoped_team_member_directory(client):
@@ -211,6 +230,7 @@ def test_intake_details_notifications_and_search(client):
     letter = response.get_json()
     assert letter["reference"].startswith("SIGL-IN-")
     assert (letter["priority"], letter["due_date"], letter["confidentiality"]) == ("urgent", "2026-10-10", "confidential")
+    route_as_md(client, letter["id"], department_id)
 
     login(client, "head")
     assert any(n["kind"] == "new_letter" for n in client.get("/notifications").get_json())
@@ -274,6 +294,11 @@ def test_md_can_approve_directly_at_any_stage(client):
         },
         content_type="multipart/form-data",
     ).get_json()["id"]
+
+    login(client, "md")
+    # The reply takes its reference from a department, so the letter is sent to one first.
+    assert client.post(f"/letters/{letter_id}/md-approve", json={"response_text": "x"}).status_code == 400
+    route_as_md(client, letter_id, department_id)
 
     login(client, "head")
     assert client.post(f"/letters/{letter_id}/md-approve", json={"response_text": "x"}).status_code == 403

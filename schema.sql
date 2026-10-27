@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS letters (
     source_storage_path TEXT,
     editable_document BLOB,
     editable_filename TEXT,
-    department_id INTEGER NOT NULL REFERENCES departments(id),
+    -- Empty while a newly received letter waits for the MD to send it to a department.
+    department_id INTEGER REFERENCES departments(id),
     status TEXT NOT NULL CHECK (status IN (
         'intake', 'assigned', 'in_progress', 'dept_review', 'submitted_for_review',
         'md_review', 'changes_requested', 'approved', 'finalized'
@@ -77,6 +78,8 @@ CREATE TABLE IF NOT EXISTS letters (
     signatory_id INTEGER REFERENCES users(id),
     signatory_title TEXT,
     addressee_title TEXT,
+    editing_by INTEGER REFERENCES users(id),
+    editing_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

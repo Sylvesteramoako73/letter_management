@@ -4,10 +4,11 @@ import zipfile
 import pymupdf
 from docx import Document
 
-from test_workflow import client, head_approves, login, respond  # noqa: F401  (pytest fixture)
+from test_workflow import client, head_approves, login, respond, route_as_md  # noqa: F401  (pytest fixture)
 
 
 def register(client, department_id, sender="Ministry of Finance", **extra):
+    """The front desk registers a letter and the MD sends it to the department; leaves the front desk signed in."""
     login(client, "frontdesk")
     response = client.post(
         "/letters/upload",
@@ -28,7 +29,9 @@ def register(client, department_id, sender="Ministry of Finance", **extra):
         content_type="multipart/form-data",
     )
     assert response.status_code == 201, response.get_json()
-    return response.get_json()
+    letter = route_as_md(client, response.get_json()["id"], department_id)
+    login(client, "frontdesk")
+    return letter
 
 
 def approve_as_md(client, letter_id):
@@ -343,9 +346,10 @@ def test_autosaves_merge_into_one_version_per_session(client):
     assert [v["change_summary"] for v in detail["versions"]] == ["Letter edited in the app", "Letter started on letterhead"]
     assert [e["action"] for e in detail["audit"]] == ["outgoing_created", "response_saved"]
     assert detail["letter"]["body_html"] == "<p>Third draft</p>"
-    # Someone else's edit starts its own version.
+    # Someone else's edit starts its own version, once the writer has closed the editor.
+    client.delete(f"/letters/{letter['id']}/editing")
     login(client, "md")
-    client.put(f"/letters/{letter['id']}/response", json={"body_html": "<p>MD edit</p>"})
+    assert client.put(f"/letters/{letter['id']}/response", json={"body_html": "<p>MD edit</p>"}).status_code == 200
     assert len(client.get(f"/letters/{letter['id']}").get_json()["versions"]) == 3
 
 

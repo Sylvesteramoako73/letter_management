@@ -1,9 +1,14 @@
 """Two registers: letters received (incoming) and letters sent (outgoing).
 
-An incoming letter is registered, routed and assigned. Responding to it starts a
-separate outgoing letter linked back through ``in_reply_to``. Outgoing letters are
-drafted in Word on letterhead, approved by the MD, finalised as a PDF, then
+An incoming letter is registered by the front desk and goes to the MD, who sends it
+to a department (whose head assigns it) or straight to a person. Responding to it
+starts a separate outgoing letter linked back through ``in_reply_to``. Outgoing
+letters are drafted on letterhead, approved by the MD, finalised as a PDF, then
 dispatched and tracked to delivery.
+
+``in_reply_to`` links letters both ways into a thread: our reply to a letter received,
+our follow-up to a letter we sent, and (set by the department head) a letter received
+that answers or follows up an earlier one.
 """
 
 import hashlib
@@ -14,7 +19,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
-from werkzeug.exceptions import BadRequest, Forbidden, NotFound
+from werkzeug.exceptions import BadRequest, Conflict, Forbidden, NotFound
 
 import letterhead
 import signing
@@ -187,8 +192,9 @@ def _version(connection, letter_id, actor_id, version_type, content, file_name, 
 
 def _change_status(connection, letter, actor, new_status, action, details=None):
     old_status = letter["status"]
+    # Moving on to another stage closes the editor for whoever had it open.
     connection.execute(
-        "UPDATE letters SET status = ?, updated_at = ? WHERE id = ?",
+        "UPDATE letters SET status = ?, editing_by = NULL, editing_at = NULL, updated_at = ? WHERE id = ?",
         (new_status, utc_now(), letter["id"]),
     )
     _audit(connection, letter["id"], actor["id"], action, old_status, new_status, details)
@@ -282,20 +288,24 @@ def _next_our_reference(connection, institute: str, department_id: int) -> str:
 
 
 def create_letter(actor, sender, subject, received_date, department_id, source_file, content, details=None, storage_path=None):
-    """Register a received letter. With storage_path, content was fetched from storage and is not kept in the database."""
+    """Register a received letter. With storage_path, content was fetched from storage and is not kept in the database.
+
+    It goes to the MD, who sends it on. Only those who route letters (the MD and MD PA) may send it
+    straight to a department as they register it.
+    """
     if not can(actor, "register_incoming"):
         raise Forbidden("You are not allowed to register incoming letters")
     validate_source_file(source_file, len(content))
     extra = _clean_details(details)
     if not extra["signatory"]:
         raise BadRequest("Enter the name of the person who signed the letter")
+    department_id = _int_or_none(department_id, "Choose a department") if can(actor, "route_letters") else None
     digest = hashlib.sha256(content).hexdigest()
     connection = connect()
     try:
-        department = connection.execute(
-            "SELECT id, name FROM departments WHERE id = ?", (department_id,)
-        ).fetchone()
-        if department is None:
+        if department_id is not None and connection.execute(
+            "SELECT id FROM departments WHERE id = ?", (department_id,)
+        ).fetchone() is None:
             raise BadRequest("The selected department does not exist")
         editable_document = to_editable_docx(source_file, content)
         editable_filename = f"{Path(source_file).stem}.docx"
@@ -349,15 +359,20 @@ def create_letter(actor, sender, subject, received_date, department_id, source_f
         _audit(connection, letter_id, actor["id"], "intake_created", None, "intake")
         _version(connection, letter_id, actor["id"], "source", content, source_file, "Original scanned document", storage_path, digest)
         _version(connection, letter_id, actor["id"], "editable", editable_document, editable_filename, "Generated editable document")
-        _notify_role(
-            connection,
-            "department_head",
-            letter_id,
-            "new_letter",
-            "New letter for your department",
-            f"{reference} from {sender} needs to be assigned.",
-            department_id=department_id,
-        )
+        if department_id is None:
+            for role in ("md", "md_pa"):
+                _notify_role(connection, role, letter_id, "new_letter", "New letter to route",
+                             f"{reference} from {sender} is waiting to be sent to a department.", exclude_id=actor["id"])
+        else:
+            _notify_role(
+                connection,
+                "department_head",
+                letter_id,
+                "new_letter",
+                "New letter for your department",
+                f"{reference} from {sender} needs to be assigned.",
+                department_id=department_id,
+            )
         connection.commit()
         if os.environ.get("SALES_NOTIFICATION_WEBHOOK"):
             logger.info("Hot-lead notification integration is configured for external dispatch")
@@ -454,27 +469,35 @@ def assign_letter(actor, letter_id: int, assignee_id: int):
         letter = _get_letter(connection, letter_id)
         if not can(actor, "assign_letters"):
             raise Forbidden("You are not allowed to assign letters")
-        if not can(actor, "all_letters") and actor["department_id"] != letter["department_id"]:
+        admin = can(actor, "all_letters")
+        if not admin and actor["department_id"] != letter["department_id"]:
             raise Forbidden("You can only assign letters within your own department")
         assignee = connection.execute(
             "SELECT * FROM users WHERE id = ? AND active = 1", (assignee_id,)
         ).fetchone()
-        # A department head may also take a letter on themselves.
+        # A department head may also take a letter on themselves; the MD may hand one to a head directly.
         self_assigned = assignee is not None and assignee["id"] == actor["id"] and actor["role"] == "department_head"
-        if assignee is None or (assignee["role"] != "team_member" and not self_assigned):
-            raise Forbidden("Letters can only be assigned to an active team member")
-        if assignee["department_id"] != letter["department_id"]:
-            raise Forbidden("The assignee must belong to the letter's department")
+        roles = {"team_member", "department_head"} if admin else {"team_member"}
+        if assignee is None or (assignee["role"] not in roles and not self_assigned):
+            raise Forbidden("Letters can only be assigned to an active team member" + (" or department head" if admin else ""))
         outgoing = is_outgoing(letter)
         assignable = {"intake", "in_progress", "changes_requested"} if outgoing else {"intake", "assigned"}
         if letter["status"] not in assignable:
             raise Forbidden("This letter is not assignable in its current state")
+        # A letter not yet picked up can be sent by the MD straight to someone in any department; it moves there with them.
+        moving = assignee["department_id"] != letter["department_id"]
+        if moving and not (admin and letter["status"] == "intake" and assignee["department_id"]):
+            raise Forbidden("The assignee must belong to the letter's department")
         # An outgoing letter goes straight to drafting; a received one waits for its assignee to respond.
         new_status = ("in_progress" if letter["status"] == "intake" else letter["status"]) if outgoing else "assigned"
         connection.execute(
             "UPDATE letters SET assigned_to = ?, status = ?, updated_at = ? WHERE id = ?",
             (assignee_id, new_status, utc_now(), letter_id),
         )
+        if moving:
+            connection.execute(
+                "UPDATE letters SET department_id = ?, signatory_id = NULL WHERE id = ?", (assignee["department_id"], letter_id)
+            )
         _audit(
             connection,
             letter_id,
@@ -482,7 +505,8 @@ def assign_letter(actor, letter_id: int, assignee_id: int):
             "assigned",
             letter["status"],
             new_status,
-            {"assignee_id": assignee_id},
+            {"assignee_id": assignee_id, "assignee": assignee["display_name"],
+             **({"department_id": assignee["department_id"]} if moving else {})},
         )
         if not self_assigned:
             _notify(
@@ -581,10 +605,141 @@ def update_register_details(actor, letter_id: int, changes: dict):
         connection.close()
 
 
+# ---------------------------------------------------------------- Threads
+
+
+THREAD_COLUMNS = """
+    id, direction, reference, our_reference, subject, sender, status, matter_status, dispatch_status,
+    in_reply_to, department_id, assigned_to, created_by, created_at, received_date, letter_date,
+    finalized_at, dispatched_on, delivered_on
+"""
+MAX_THREAD = 200
+
+
+def _thread_row(connection, letter_id):
+    return connection.execute(f"SELECT {THREAD_COLUMNS} FROM letters WHERE id = ?", (letter_id,)).fetchone()
+
+
+def thread(connection, letter, viewer) -> list:
+    """Every letter in the same correspondence, oldest first: back to the first letter, and all that answer any of them.
+
+    Only letters the viewer may see are listed.
+    """
+    root = _thread_row(connection, letter["id"])
+    seen = {root["id"]}
+    while root["in_reply_to"] and root["in_reply_to"] not in seen:
+        parent = _thread_row(connection, root["in_reply_to"])
+        if parent is None:
+            break
+        seen.add(parent["id"])
+        root = parent
+    members = {root["id"]: root}
+    frontier = [root["id"]]
+    while frontier and len(members) < MAX_THREAD:
+        placeholders = ", ".join("?" for _ in frontier)
+        rows = connection.execute(
+            f"SELECT {THREAD_COLUMNS} FROM letters WHERE in_reply_to IN ({placeholders})", frontier
+        ).fetchall()
+        frontier = [row["id"] for row in rows if row["id"] not in members]
+        members.update((row["id"], row) for row in rows)
+    ordered = sorted(members.values(), key=lambda row: (str(row["created_at"]), row["id"]))
+    return [dict(row) for row in ordered if can_view(viewer, row)]
+
+
+def may_link(actor, letter) -> bool:
+    """The department head decides which earlier letter a received letter answers; the MD and MD PA may too."""
+    if is_outgoing(letter):
+        return False
+    return is_admin(actor) or (actor["role"] == "department_head" and actor["department_id"] == letter["department_id"])
+
+
+def link_to_earlier(actor, letter_id: int, earlier_id):
+    """Record which earlier letter a received letter answers or follows up, or clear it with None."""
+    connection = connect()
+    try:
+        letter = _get_letter(connection, letter_id)
+        if is_outgoing(letter):
+            raise BadRequest("A letter we send is linked when it is started with Respond or Follow up")
+        if not may_link(actor, letter):
+            raise Forbidden("Only the department head, the MD or the MD PA can say which letter this answers")
+        earlier_id = _int_or_none(earlier_id, "Choose the earlier letter")
+        earlier = None
+        if earlier_id is not None:
+            if earlier_id == letter_id:
+                raise BadRequest("A letter cannot answer itself")
+            earlier = _get_letter(connection, earlier_id)
+            require_view(actor, earlier)
+            # No loops: the earlier letter cannot itself be part of what answers this one.
+            node, seen = earlier, set()
+            while node["in_reply_to"] and node["in_reply_to"] not in seen:
+                if node["in_reply_to"] == letter_id:
+                    raise BadRequest("That letter already answers this one")
+                seen.add(node["in_reply_to"])
+                node = _thread_row(connection, node["in_reply_to"])
+        if earlier_id != letter["in_reply_to"]:
+            connection.execute("UPDATE letters SET in_reply_to = ?, updated_at = ? WHERE id = ?", (earlier_id, utc_now(), letter_id))
+            reference = (earlier["our_reference"] or earlier["reference"]) if earlier else None
+            _audit(connection, letter_id, actor["id"], "thread_linked", letter["status"], letter["status"],
+                   {"earlier_id": earlier_id, "reference": reference})
+            if earlier is not None and is_outgoing(earlier) and earlier["assigned_to"] not in (None, actor["id"]):
+                _notify(connection, earlier["assigned_to"], letter_id, "reply_received", "Reply received",
+                        f"{letter['reference']} from {letter['sender']} answers your letter {reference}.")
+            connection.commit()
+        return _get_letter(connection, letter_id)
+    finally:
+        connection.close()
+
+
 # ---------------------------------------------------------------- Outgoing register
 
 
 EDIT_SESSION = timedelta(minutes=10)
+# Only one person drafts at a time. The editor checks in every few seconds; a lock not renewed for this long is free.
+EDIT_LOCK = timedelta(seconds=90)
+
+
+def _take_editing(connection, letter, actor):
+    """Hold the letter open in this person's editor. Returns who else has it open, or None once it is theirs."""
+    cutoff = (datetime.now(timezone.utc) - EDIT_LOCK).isoformat()
+    taken = connection.execute(
+        """
+        UPDATE letters SET editing_by = ?, editing_at = ?
+        WHERE id = ? AND (editing_by IS NULL OR editing_by = ? OR editing_at IS NULL OR editing_at < ?)
+        """,
+        (actor["id"], utc_now(), letter["id"], actor["id"], cutoff),
+    ).rowcount
+    if taken:
+        return None
+    return connection.execute(
+        "SELECT u.id, u.display_name FROM letters l JOIN users u ON u.id = l.editing_by WHERE l.id = ?", (letter["id"],)
+    ).fetchone()
+
+
+def open_editor(actor, letter_id: int) -> dict:
+    """Open the letter for editing, unless someone else is editing it right now."""
+    connection = connect()
+    try:
+        letter = _get_letter(connection, letter_id)
+        if not can_edit(actor, letter):
+            raise Forbidden("You cannot edit this letter at its current stage")
+        other = _take_editing(connection, letter, actor)
+        connection.commit()
+        if other is None:
+            return {"mine": True, "editing_by": actor["id"], "editing_name": actor["display_name"]}
+        return {"mine": False, "editing_by": other["id"], "editing_name": other["display_name"]}
+    finally:
+        connection.close()
+
+
+def close_editor(actor, letter_id: int) -> None:
+    connection = connect()
+    try:
+        connection.execute(
+            "UPDATE letters SET editing_by = NULL, editing_at = NULL WHERE id = ? AND editing_by = ?", (letter_id, actor["id"])
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def _recent(row, actor, action_field, action) -> bool:
@@ -693,16 +848,22 @@ def _insert_outgoing(connection, actor, fields, writer_id) -> int:
     return letter_id
 
 
-def _require_responder(actor, incoming) -> None:
-    if is_outgoing(incoming):
-        raise BadRequest("Responses are written to received letters")
-    # Anyone who can see the letter and may write outgoing letters can reply to it.
-    if not (can(actor, "create_outgoing") and can_view(actor, incoming)):
+def _require_responder(actor, original) -> None:
+    """A reply answers a letter received; a follow-up follows a letter we sent once it is approved."""
+    if is_outgoing(original) and original["status"] != "finalized":
+        raise BadRequest("A follow-up can be written once this letter is approved")
+    # Anyone who can see the letter and may write outgoing letters can reply to it or follow it up.
+    if not (can(actor, "create_outgoing") and can_view(actor, original)):
         raise Forbidden("You are not allowed to respond to this letter")
 
 
 def _link_response(connection, actor, incoming, response_id: int) -> None:
     response = _get_letter(connection, response_id)
+    if is_outgoing(incoming):
+        # A follow-up leaves the letter it follows as it is; the history notes it.
+        _audit(connection, incoming["id"], actor["id"], "follow_up_started", incoming["status"], incoming["status"],
+               {"response_id": response_id, "our_reference": response["our_reference"]})
+        return
     new_status = "in_progress" if incoming["status"] in {"intake", "assigned"} else incoming["status"]
     connection.execute(
         "UPDATE letters SET status = ?, assigned_to = COALESCE(assigned_to, ?), updated_at = ? WHERE id = ?",
@@ -721,16 +882,24 @@ def _link_response(connection, actor, incoming, response_id: int) -> None:
 
 def _open_response(connection, incoming_id: int):
     return connection.execute(
-        "SELECT * FROM letters WHERE in_reply_to = ? AND status != 'finalized' ORDER BY id DESC LIMIT 1",
+        "SELECT * FROM letters WHERE in_reply_to = ? AND direction = 'outgoing' AND status != 'finalized' ORDER BY id DESC LIMIT 1",
         (incoming_id,),
     ).fetchone()
 
 
 def _respond(connection, actor, incoming):
-    """The response being drafted for a received letter, starting one if there is none."""
+    """The reply (or follow-up) being drafted for a letter, starting one if there is none."""
     existing = _open_response(connection, incoming["id"])
     if existing is not None:
         return existing
+    if incoming["department_id"] is None:
+        raise BadRequest("Send the letter to a department first, so the reply gets its reference")
+    if is_outgoing(incoming):
+        # A follow-up goes to the same people as the letter it follows.
+        to = {"addressee": incoming["addressee"], "addressee_title": incoming["addressee_title"],
+              "recipient_address": incoming["recipient_address"], "cc_parties": incoming["cc_parties"]}
+    else:
+        to = {"addressee": incoming["signatory"], "addressee_title": incoming["signatory_title"]}
     response_id = _insert_outgoing(
         connection,
         actor,
@@ -739,9 +908,8 @@ def _respond(connection, actor, incoming):
             "subject": incoming["subject"],
             "department_id": incoming["department_id"],
             "agency_reference": incoming["agency_reference"],
-            "addressee": incoming["signatory"],
-            "addressee_title": incoming["signatory_title"],
-            "due_date": incoming["due_date"],
+            **to,
+            "due_date": None if is_outgoing(incoming) else incoming["due_date"],
             "in_reply_to": incoming["id"],
             "priority": incoming["priority"],
             "confidentiality": incoming["confidentiality"],
@@ -753,7 +921,7 @@ def _respond(connection, actor, incoming):
 
 
 def start_response(actor, incoming_id: int):
-    """The Respond button: an outgoing letter linked to this one, with its Word draft on letterhead."""
+    """The Respond (or Follow up) button: an outgoing letter linked to this one, on letterhead."""
     connection = connect()
     try:
         incoming = _get_letter(connection, incoming_id)
@@ -872,6 +1040,9 @@ def save_response(actor, letter_id: int, body_html: str | None = None, response_
             raise BadRequest("Press Respond to start the reply as an outgoing letter")
         if not can_edit(actor, letter):
             raise Forbidden("You cannot edit this letter at its current stage")
+        other = _take_editing(connection, letter, actor)
+        if other is not None:
+            raise Conflict(f"{other['display_name']} is editing this letter right now. Your changes were not saved.")
         html = body_html if body_html is not None else letterhead.template_html(letter, response_text)
         _store_body(connection, letter, actor, html, "Letter edited in the app", merge_recent=True)
         last_event = connection.execute(
@@ -1108,6 +1279,15 @@ def request_changes(actor, letter_id: int, details: str):
         connection.close()
 
 
+# Letters are set in Times New Roman. The PDF embeds Times (PyMuPDF's built-in copy), which has the same metrics.
+TIMES_FONTS = (("tiro", "times.otf"), ("tibo", "times-bold.otf"), ("tiit", "times-italic.otf"), ("tibi", "times-bolditalic.otf"))
+TIMES_CSS = "".join(
+    f'@font-face {{font-family: "Times New Roman"; src: url({name});'
+    f'{" font-weight: bold;" if "bold" in name else ""}{" font-style: italic;" if "italic" in name else ""}}}'
+    for _, name in TIMES_FONTS
+)
+
+
 def _final_pdf(connection, letter, approver) -> bytes:
     """Lay out the approved letter on the company letterhead, signed by its signatory, with any enclosures."""
     from html import escape
@@ -1117,6 +1297,8 @@ def _final_pdf(connection, letter, approver) -> bytes:
     approved_on = datetime.now(timezone.utc).strftime("%d %B %Y")
     our_reference = letter["our_reference"]
     archive = pymupdf.Archive()
+    for code, name in TIMES_FONTS:
+        archive.add((pymupdf.Font(code).buffer, name))
     signer = signatory(connection, letter, approver)
     image = ""
     if signer["signature"]:
@@ -1127,16 +1309,16 @@ def _final_pdf(connection, letter, approver) -> bytes:
     {letter_closing(connection, letter, signer, image)}
     <p class="stamp">Approved by {escape(approver['display_name'])} on {approved_on} and digitally signed. Reference {escape(our_reference)}.</p>
     """
-    css = """
-    * {font-family: sans-serif; font-size: 10.5pt; line-height: 1.45; color: #1a1a1a;}
+    css = TIMES_CSS + """
+    * {font-family: "Times New Roman"; font-size: 12pt; line-height: 1.4; color: #1a1a1a;}
     p {margin: 0;}
-    h1 {font-size: 15pt; font-weight: bold; margin: 6px 0;}
-    h2 {font-size: 13pt; font-weight: bold; margin: 6px 0;}
-    h3 {font-size: 11.5pt; font-weight: bold; margin: 6px 0;}
+    h1 {font-size: 16pt; font-weight: bold; margin: 6px 0;}
+    h2 {font-size: 14pt; font-weight: bold; margin: 6px 0;}
+    h3 {font-size: 12.5pt; font-weight: bold; margin: 6px 0;}
     ul, ol {margin: 0 0 0 0; padding-left: 22px;}
     .ql-align-center {text-align: center;} .ql-align-right {text-align: right;} .ql-align-justify {text-align: justify;}
     .ql-indent-1 {margin-left: 36px;} .ql-indent-2 {margin-left: 72px;} .ql-indent-3 {margin-left: 108px;} .ql-indent-4 {margin-left: 144px;}
-    .ql-size-small {font-size: 8.5pt;} .ql-size-large {font-size: 14pt;} .ql-size-huge {font-size: 19pt;}
+    .ql-size-small {font-size: 10pt;} .ql-size-large {font-size: 15pt;} .ql-size-huge {font-size: 20pt;}
     .stamp {margin-top: 26px; font-size: 8pt; color: #777;}
     """
     with pymupdf.open(letterhead.LETTERHEAD_PDF) as paper:
@@ -1161,7 +1343,9 @@ def _final_pdf(connection, letter, approver) -> bytes:
             )
             sheet.insert_htmlbox(
                 pymupdf.Rect(*letterhead.REFERENCE_AREA),
-                f'<p style="text-align:right;font-family:sans-serif;font-size:9pt;line-height:1.35;color:#333">{corner}</p>',
+                f'<p style="text-align:right;font-family:Times New Roman;font-size:10pt;line-height:1.35;color:#333">{corner}</p>',
+                css=TIMES_CSS,
+                archive=archive,
             )
     document.set_metadata({"title": f"{our_reference} - {letter['subject']}", "author": "Swami India Ghana Limited"})
     # Locked by the digital signature in _finalize rather than by a password.
@@ -1222,7 +1406,8 @@ def _finalize(connection, letter, actor) -> None:
     if reply:
         incoming = _get_letter(connection, letter["in_reply_to"])
         recipients.add(incoming["created_by"])
-        if incoming["status"] != "finalized":
+        # Approving a reply marks the received letter responded; a follow-up leaves our earlier letter as it is.
+        if not is_outgoing(incoming) and incoming["status"] != "finalized":
             connection.execute(
                 """
                 UPDATE letters
@@ -1352,7 +1537,7 @@ def _require_closable(connection, letter) -> None:
             raise BadRequest("Upload the stamped or signed copy of this letter before closing it")
         return
     missing = connection.execute(
-        "SELECT our_reference FROM letters WHERE in_reply_to = ? AND delivery_proof IS NULL", (letter["id"],)
+        "SELECT our_reference FROM letters WHERE in_reply_to = ? AND direction = 'outgoing' AND delivery_proof IS NULL", (letter["id"],)
     ).fetchall()
     if missing:
         references = ", ".join(row["our_reference"] for row in missing)

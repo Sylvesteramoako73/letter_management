@@ -196,3 +196,8 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS microsoft_oid TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_microsoft_oid ON users(microsoft_oid) WHERE microsoft_oid IS NOT NULL;
 ALTER TABLE letters ADD COLUMN IF NOT EXISTS signatory_title TEXT;
 ALTER TABLE letters ADD COLUMN IF NOT EXISTS addressee_title TEXT;
+-- A newly received letter waits for the MD to send it to a department.
+ALTER TABLE letters ALTER COLUMN department_id DROP NOT NULL;
+-- Who has the letter open in the editor: one person drafts at a time.
+ALTER TABLE letters ADD COLUMN IF NOT EXISTS editing_by INTEGER REFERENCES users(id);
+ALTER TABLE letters ADD COLUMN IF NOT EXISTS editing_at TEXT;

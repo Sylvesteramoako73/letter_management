@@ -3,18 +3,20 @@
 This is a small Flask/SQLite intranet backend for routing scanned agency letters
 through the SIGL role hierarchy:
 
-`front_desk -> department_head -> team_member -> md_pa -> md -> finalized PDF`
+`front_desk -> md -> department_head -> team_member -> md_pa -> md -> finalized PDF`
 
 ## Registers
 
 Letters live in two registers, both in the `letters` table (`direction`):
 
 - **Incoming** (received): registered by the front desk with the details on the
-  letter (locked afterwards; the MD or MD PA can correct them), routed to a
-  department and assigned. Action required, deadline, status
+  letter (locked afterwards; the MD or MD PA can correct them). It goes to the
+  MD (no department yet), who sends it to a department, whose head assigns it,
+  or straight to a person. Action required, deadline, status
   (open/closed/responded) and remarks are tracked throughout.
-- **Outgoing** (sent): a new letter, or a reply started with **Respond** on a
-  received letter (`in_reply_to`). Each gets an *our reference*
+- **Outgoing** (sent): a new letter, a reply started with **Respond** on a
+  received letter, or a **Follow up** to one of our approved letters
+  (`in_reply_to`). Each gets an *our reference*
   `SIGL/<institution initials>/<department code>/<serial>`, the serial counted
   per institution. It is drafted in Word on letterhead, sent for approval
   (MD PA, then MD, who can approve or return it), finalised as a locked PDF,
@@ -22,7 +24,19 @@ Letters live in two registers, both in the `letters` table (`direction`):
   proof) before being closed.
 
 On approval a reply's Word draft is deleted, as the original process required;
-a new letter keeps an approved Word copy alongside the PDF.
+a new letter keeps an approved Word copy alongside the PDF. Letters are set in
+Times New Roman in the editor, the Word copy and the PDF.
+
+**Threads.** `in_reply_to` links letters both ways, so a letter page shows the
+whole correspondence and any letter in it can be answered. The department head
+(or the MD or MD PA) records which earlier letter a received letter answers.
+
+**One writer at a time.** Opening the editor holds the letter (`editing_by`);
+others see it read-only until the editor closes or goes quiet for 90 seconds.
+
+**Escalation.** The daily job (see `reminders.py`) passes a letter left
+unassigned or in draft for more than 7 days to its department head, and after
+more than 15 days to the MD, bringing the MD PA in as a collaborator.
 
 ## Run
 

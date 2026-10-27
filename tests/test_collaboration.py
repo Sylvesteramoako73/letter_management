@@ -306,9 +306,14 @@ def test_collaborators_share_control_of_the_letter(client):
     assert client.put(f"/letters/{letter['id']}/response", json={"body_html": "<p>Civil's section.</p>"}).status_code == 200
     assert client.post(f"/letters/{letter['id']}/matter-status", json={"matter_status": "open", "remarks": "Civil added site dates"}).status_code == 200
     assert client.post(f"/letters/{letter['id']}/collaborators", json={"department_id": finance}).status_code == 201
-    # Anyone in a department brought in has the same control.
+    # Anyone in a department brought in has the same control, one person at a time in the editor.
     login(client, "financeandaccountsmember")
-    assert client.put(f"/letters/{letter['id']}/response", json={"body_html": "<p>Civil's section.</p><p>Finance's figures.</p>"}).status_code == 200
+    edit = {"body_html": "<p>Civil's section.</p><p>Finance's figures.</p>"}
+    assert client.put(f"/letters/{letter['id']}/response", json=edit).status_code == 409
+    login(client, "civilmember")
+    assert client.delete(f"/letters/{letter['id']}/editing").status_code == 200
+    login(client, "financeandaccountsmember")
+    assert client.put(f"/letters/{letter['id']}/response", json=edit).status_code == 200
     assert client.post(f"/letters/{letter['id']}/submit").get_json()["status"] == "dept_review"
     # Someone not brought in has none of it.
     login(client, "hrmember")

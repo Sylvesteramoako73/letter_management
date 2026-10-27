@@ -124,6 +124,22 @@ const isWorking = (letter) => awaitingReply(letter) || drafting(letter);
 const toDispatch = (letter) => isOutgoing(letter) && letter.status === 'finalized' && ['pending', 'returned'].includes(letter.dispatch_status) && letter.matter_status !== 'closed';
 const awaitingDelivery = (letter) => isOutgoing(letter) && letter.dispatch_status === 'sent';
 const isOverdue = (letter) => Boolean(letter.due_date) && letter.due_date < todayISO() && (isOutgoing(letter) ? !isSent(letter) && letter.matter_status !== 'closed' : isOpen(letter));
+// A received letter waits with the MD until it is sent to a department.
+const withMD = (letter) => letter.status === 'intake' && !letter.department_id;
+const deptLabel = (letter) => letter.department_name || 'With the MD';
+const isClosed = (letter) => letter.matter_status === 'closed';
+// Where a letter is now. Each stage opens the list of letters at it, from the dashboard and from the letter itself.
+const STAGES = [
+  ['routing', 'With the MD to send on', withMD],
+  ['unassigned', 'Awaiting assignment', (l) => l.status === 'intake' && Boolean(l.department_id)],
+  ['drafting', 'Drafting', isWorking],
+  ['head', 'With department head', (l) => l.status === 'dept_review'],
+  ['pa', 'With the MD PA', (l) => l.status === 'submitted_for_review'],
+  ['md', 'With the MD for approval', (l) => l.status === 'md_review'],
+  ['dispatch', 'Ready to dispatch', toDispatch],
+  ['sent', 'Sent, delivery not confirmed', awaitingDelivery],
+];
+const stageKey = (letter) => (isClosed(letter) ? 'closed' : (STAGES.find(([, , test]) => test(letter)) || [])[0] || null);
 function dueInfo(letter) {
   if (!letter.due_date || !(isOutgoing(letter) ? !isSent(letter) : isOpen(letter))) return null;
   const days = Math.round((parseTs(letter.due_date) - parseTs(todayISO())) / 86400000);
@@ -160,6 +176,14 @@ const confChip = (letter) => (letter.confidentiality && letter.confidentiality !
 const registerOf = (letter) => (isOutgoing(letter) ? 'outgoing' : 'incoming');
 // Status plus stage, without repeating a word (a responded letter's stage is also "Responded").
 const statusPills = (letter) => matterPill(letter) + (stageLabel(letter) === (MATTER[letter.matter_status] || 'Open') ? '' : stagePill(letter));
+// The same, with the stage opening every letter at that stage.
+function statusLinks(letter) {
+  const key = stageKey(letter);
+  if (!key || key === 'closed') return statusPills(letter);
+  const [cls, label] = stageOf(letter);
+  const shown = withMD(letter) ? 'With the MD to send on' : label;
+  return matterPill(letter) + `<a class="pill ${esc(cls)}" href="#/letters?view=${key}" title="See every letter at this stage">${esc(shown)}</a>`;
+}
 
 function toast(text, type = 'success') {
   const node = document.createElement('div');
@@ -218,7 +242,7 @@ const departmentName = (id) => (state.departments.find((d) => d.id === Number(id
 /* ---------------- Role configuration ---------------- */
 const CREATE_INCOMING = ['Register incoming letter', '#/intake', 'inbox'];
 const CREATE_OUTGOING = ['Create outgoing letter', '#/compose', 'send'];
-const REGISTERS_NAV = [['incoming', 'inbox', 'Incoming register'], ['outgoing', 'send', 'Outgoing register'], ['verify', 'lock', 'Check a letter']];
+const REGISTERS_NAV = [['incoming', 'inbox', 'Incoming register'], ['outgoing', 'send', 'Outgoing register'], ['letters', 'layers', 'All letters'], ['verify', 'lock', 'Check a letter']];
 const outgoingWaiting = (l) => isOutgoing(l) && l.status === 'finalized' && isOpen(l);
 
 function roleConfig(role) {
@@ -226,7 +250,7 @@ function roleConfig(role) {
   const configs = {
     front_desk: {
       nav: [['', 'home', 'Dashboard'], ...REGISTERS_NAV],
-      hero: ['Front desk', 'Register letters received and letters to be sent. Then dispatch approved letters and confirm delivery.', 'upload', [CREATE_INCOMING, CREATE_OUTGOING]],
+      hero: ['Front desk', 'Register letters received: they go to the MD, who sends them on. Register letters to be sent, then dispatch approved letters and confirm delivery.', 'upload', [CREATE_INCOMING, CREATE_OUTGOING]],
       action: (l) => l.status === 'intake' || toDispatch(l) || awaitingDelivery(l),
       kpis: [
         { label: 'Registered today', icon: 'inbox', tone: 'wine', count: (ls) => ls.filter((l) => { const d = parseTs(l.created_at); return !isOutgoing(l) && d && localISO(d) === todayISO(); }).length, hint: 'By you', link: '#/incoming' },
@@ -237,7 +261,7 @@ function roleConfig(role) {
       queues: [
         { title: 'Ready to dispatch', sub: 'Approved by the MD. Print or email them, then record how they were sent.', filter: toDispatch, empty: ['Nothing to send', 'Approved letters will appear here.'] },
         { title: 'Sent: confirm delivery', sub: 'Record delivery once you have a stamped copy or acknowledgement.', filter: awaitingDelivery, hideWhenEmpty: true },
-        { title: 'Awaiting assignment', sub: 'Still waiting for a department head. You can re-route these.', filter: (l) => l.status === 'intake', hideWhenEmpty: true },
+        { title: 'Awaiting assignment', sub: 'Still with the MD, or waiting for a department head to pick them up.', filter: (l) => l.status === 'intake', hideWhenEmpty: true },
         { title: 'Recently registered', sub: 'Where your letters are now.', filter: (l) => !isOutgoing(l) && l.status !== 'intake', limit: 6, sort: 'recent', hideWhenEmpty: true },
       ],
     },
@@ -294,15 +318,16 @@ function roleConfig(role) {
     },
     md: {
       nav: [['', 'home', 'Dashboard'], ...REGISTERS_NAV, ['reports', 'chart', 'Reports'], ['admin', 'settings', 'Users & departments']],
-      hero: ['Executive approval desk', 'Letters awaiting your decision are listed first. Approving produces the final, locked PDF.', 'lock', ['View reports', '#/reports']],
-      action: (l) => l.status === 'md_review',
+      hero: ['Executive desk', 'Send each letter received to a department or a person, and decide on letters awaiting your approval. Approving produces the final, locked PDF.', 'lock', ['View reports', '#/reports']],
+      action: (l) => l.status === 'md_review' || withMD(l),
       kpis: [
+        { label: 'To send on', icon: 'inbox', tone: 'blue', count: (ls) => ls.filter(withMD).length, hint: 'Letters received', link: '#/letters?view=routing', alert: true },
         { label: 'Awaiting approval', icon: 'lock', tone: 'wine', count: (ls) => ls.filter((l) => l.status === 'md_review').length, hint: 'Waiting on you', link: '#/outgoing?view=review' },
-        { label: 'Overdue', icon: 'alert', tone: 'red', count: (ls) => ls.filter(isOverdue).length, hint: 'Company-wide', link: '#/incoming?view=overdue', alert: true },
-        { label: 'Open received letters', icon: 'inbox', tone: 'blue', count: (ls) => ls.filter((l) => !isOutgoing(l) && isOpen(l)).length, hint: 'All departments', link: '#/incoming?view=open' },
+        { label: 'Overdue', icon: 'alert', tone: 'red', count: (ls) => ls.filter(isOverdue).length, hint: 'Company-wide', link: '#/letters?view=overdue', alert: true },
         { label: 'Approved this month', icon: 'check', tone: 'green', count: (ls) => ls.filter((l) => isOutgoing(l) && l.status === 'finalized' && String(l.finalized_at || '').slice(0, 7) === todayISO().slice(0, 7)).length, hint: 'Letters sent out', link: '#/outgoing?view=approved' },
       ],
       queues: [
+        { title: 'Letters received: send them on', sub: 'Open one to send it to a department, whose head assigns it, or straight to a person.', filter: withMD, hideWhenEmpty: true },
         { title: 'Awaiting your approval', sub: 'Open a letter to read it, then approve or return it.', filter: (l) => l.status === 'md_review', empty: ['Nothing awaiting approval', 'Letters routed to you by the PA will appear here.'] },
         { title: 'Overdue across the company', sub: 'Open letters past their deadline.', filter: isOverdue, limit: 6, hideWhenEmpty: true },
         { title: 'Other open letters', sub: 'Still with departments. Open one to approve a reply directly if it can’t wait.', filter: (l) => isOpen(l) && l.status !== 'md_review' && !(isOutgoing(l) && l.status === 'finalized'), limit: 8, hideWhenEmpty: true },
@@ -356,7 +381,8 @@ function parseRoute() {
 }
 
 function closeEditor() {
-  if (state.editor) { state.editor.close(); state.editor = null; }
+  // The next view waits for this (the last save, then letting go of the letter) before it opens an editor.
+  if (state.editor) { state.closing = Promise.resolve(state.editor.close()); state.editor = null; }
 }
 
 async function router() {
@@ -371,7 +397,7 @@ async function router() {
     '': renderDashboard,
     incoming: () => renderRegister('incoming', params),
     outgoing: () => renderRegister('outgoing', params),
-    letters: () => { location.hash = `#/${params.get('dir') === 'outgoing' ? 'outgoing' : 'incoming'}`; },
+    letters: () => (params.get('dir') ? (location.hash = `#/${params.get('dir') === 'outgoing' ? 'outgoing' : 'incoming'}`) : renderRegister('all', params)),
     letter: () => renderDetail(Number(parts[1])),
     intake: can('register_incoming') ? renderIntake : null,
     compose: can('create_outgoing') ? () => renderCompose(params) : null,
@@ -397,8 +423,25 @@ function letterRow(letter, { showDept = true } = {}) {
   return `<a class="row prio-${esc(letter.priority)}" href="#/letter/${letter.id}" style="text-decoration:none;color:inherit">
     <span class="row-stripe"></span>
     <span class="row-main"><span class="row-ref">${isOutgoing(letter) ? `${icon('send', 'inline')} OUT · ` : `${icon('inbox', 'inline')} IN · `}${esc(letter.our_reference || letter.reference)}</span><span class="row-title">${esc(letter.subject)}</span>
-    <span class="row-sub">${isOutgoing(letter) ? 'To ' : 'From '}${esc(letter.sender)}${showDept ? ` · ${esc(letter.department_name)}` : ''}${esc(who)}</span></span>
+    <span class="row-sub">${isOutgoing(letter) ? 'To ' : 'From '}${esc(letter.sender)}${showDept ? ` · ${esc(deptLabel(letter))}` : ''}${esc(who)}</span></span>
     <span class="row-side">${letter.matter_status === 'closed' ? matterPill(letter) : stagePill(letter)}<span class="row-meta">${letter.shared_with_me ? `<span class="chip out">${icon('users')}Shared with you</span>` : letter.collaborator_count ? `<span class="chip">${icon('users')}${letter.collaborator_count}</span>` : ''}${priorityChip(letter.priority)}${dueChip(letter)}</span></span></a>`;
+}
+
+// Open, Drafting and Closed, then every stage letters are at, each opening the list of those letters.
+function overview(letters) {
+  const count = (test) => letters.filter(test).length;
+  const tile = (view, tone, label, test, hint) => `<a class="overview-tile tone-${tone}" href="#/letters?view=${view}"><strong>${count(test)}</strong>${esc(label)}<span>${esc(hint)}</span></a>`;
+  const stages = STAGES.map(([key, label, test]) => {
+    const value = count((l) => !isClosed(l) && test(l));
+    return `<a class="stage-link ${value ? '' : 'empty'}" href="#/letters?view=${key}"><b>${value}</b>${esc(label)}</a>`;
+  }).join('');
+  return `<section class="overview" aria-label="Where letters are">
+    <div class="overview-main">
+      ${tile('open', 'open', 'Open', isOpen, 'Someone still has something to do')}
+      ${tile('drafting', 'drafting', 'Drafting', (l) => !isClosed(l) && isWorking(l), 'Replies and letters being written')}
+      ${tile('closed', 'closed', 'Closed', isClosed, 'Finished and filed')}
+    </div>
+    <div class="stage-strip">${stages}</div></section>`;
 }
 
 function skeleton() {
@@ -430,20 +473,30 @@ async function renderDashboard() {
     const total = items.length;
     if (queue.limit) items = items.slice(0, queue.limit);
     return `<section class="card section"><div class="card-head"><div><h2>${esc(queue.title)} <span class="count-note">(${total})</span></h2><p>${esc(queue.sub)}</p></div>
-      ${queue.limit && total > queue.limit ? '<a class="btn btn-ghost btn-sm" href="#/letters">View all</a>' : ''}</div>
+      ${queue.limit && total > queue.limit ? `<a class="btn btn-ghost btn-sm" href="#/letters${queue.view ? `?view=${queue.view}` : ''}">View all</a>` : ''}</div>
       <div class="rows">${items.length ? items.map((l) => letterRow(l, { showDept: state.user.role !== 'department_head' })).join('') : empty(...queue.empty)}</div></section>`;
   }).join('');
   view.innerHTML = `
     <div class="hero"><span class="hero-icon">${icon(heroIcon)}</span><div><h2>${esc(heroTitle)}</h2><p>${esc(heroText)}</p></div>
       ${heroCta ? `<div class="hero-actions">${(Array.isArray(heroCta[0]) ? heroCta : [heroCta]).filter(([, href]) => !PAGE_CAPABILITY[href.slice(2)] || can(PAGE_CAPABILITY[href.slice(2)])).map(([label, href]) => `<a class="btn" href="${href}" style="text-decoration:none">${esc(label)} ${icon('arrow')}</a>`).join('')}</div>` : ''}</div>
+    ${overview(letters)}
     <div class="kpis">${kpis}</div>
     ${queues}`;
 }
 
 /* ---------------- Registers ---------------- */
 const REGISTER_VIEWS = {
+  // Both registers together: the dashboard's Open, Drafting and Closed, and every stage.
+  all: {
+    open: ['Open', isOpen],
+    drafting: ['Drafting', (l) => !isClosed(l) && isWorking(l)],
+    closed: ['Closed', isClosed],
+    ...Object.fromEntries(STAGES.filter(([key]) => key !== 'drafting').map(([key, label, test]) => [key, [label, (l) => !isClosed(l) && test(l)]])),
+    overdue: ['Overdue', isOverdue],
+  },
   incoming: {
     open: ['Open', isOpen],
+    routing: ['With the MD to send on', withMD],
     unassigned: ['Awaiting assignment', (l) => l.status === 'intake'],
     awaiting: ['Awaiting a reply', awaitingReply],
     working: ['Being worked on', (l) => l.status === 'assigned' || l.status === 'in_progress'],
@@ -462,26 +515,31 @@ const REGISTER_VIEWS = {
     sent: ['Sent, delivery not confirmed', awaitingDelivery],
     delivered: ['Delivered', (l) => l.dispatch_status === 'delivered'],
     overdue: ['Overdue', isOverdue],
+    closed: ['Closed', isClosed],
   },
 };
 
 async function renderRegister(direction, params) {
   const outgoing = direction === 'outgoing';
-  setPage('Correspondence', outgoing ? 'Outgoing register' : 'Incoming register', direction);
+  const both = direction === 'all';
+  setPage('Correspondence', both ? 'All letters' : outgoing ? 'Outgoing register' : 'Incoming register', both ? 'letters' : direction);
   const view = $('#view');
   const token = state.route;
   if (!state.letters) view.innerHTML = skeleton();
   const all = await loadLetters(true);
   if (stale(token)) return;
-  const letters = all.filter((l) => registerOf(l) === direction);
+  const letters = both ? all : all.filter((l) => registerOf(l) === direction);
   const wide = can('all_letters');
   const views = REGISTER_VIEWS[direction];
   const preset = params.get('view');
-  const matterOptions = outgoing ? { open: 'Open', closed: 'Closed' } : MATTER;
+  const matterOptions = outgoing || both ? { open: 'Open', closed: 'Closed' } : MATTER;
+  const [heading, blurb] = both
+    ? [preset && views[preset] ? views[preset][0] : 'Every letter', 'Letters received and sent together, wherever they are now.']
+    : outgoing ? ['Letters sent', 'New letters and replies: reference, approval, dispatch and delivery.'] : ['Letters received', 'Every letter received, who is handling it and how it was answered.'];
   view.innerHTML = `<section class="card">
-    <div class="register-head"><div><h2>${outgoing ? 'Letters sent' : 'Letters received'}</h2><p>${outgoing ? 'New letters and replies: reference, approval, dispatch and delivery.' : 'Every letter received, who is handling it and how it was answered.'}</p></div>
+    <div class="register-head"><div><h2>${esc(heading)}</h2><p>${esc(blurb)}</p></div>
       ${outgoing && can('create_outgoing') ? `<a class="btn btn-primary btn-sm" href="#/compose" style="text-decoration:none">${icon('plus')}New letter</a>` : ''}
-      ${!outgoing && can('register_incoming') ? `<a class="btn btn-primary btn-sm" href="#/intake" style="text-decoration:none">${icon('plus')}Register letter</a>` : ''}</div>
+      ${!outgoing && !both && can('register_incoming') ? `<a class="btn btn-primary btn-sm" href="#/intake" style="text-decoration:none">${icon('plus')}Register letter</a>` : ''}</div>
     <div class="toolbar">
       <label class="search"><span class="sr-only">Search</span>${icon('search')}<input id="f-q" placeholder="Search subject, institution or any reference" value="${esc(params.get('q') || '')}"></label>
       <select id="f-view" aria-label="Show"><option value="">Everything</option>${Object.entries(views).map(([k, [label]]) => `<option value="${k}" ${preset === k ? 'selected' : ''}>${label}</option>`).join('')}</select>
@@ -502,7 +560,11 @@ async function renderRegister(direction, params) {
       .sort(byUrgency);
     const body = $('#list-body');
     if (!rows.length) { body.innerHTML = empty('No letters match', letters.length ? 'Try clearing a filter.' : 'Letters in your scope will appear here.', 'search'); return; }
-    if (window.matchMedia('(max-width: 700px)').matches) { body.innerHTML = `<div class="rows">${rows.map((l) => letterRow(l)).join('')}</div>`; return; }
+    if (both || window.matchMedia('(max-width: 700px)').matches) {
+      body.innerHTML = `<div class="rows">${rows.map((l) => letterRow(l)).join('')}</div>
+        <div class="toolbar" style="border-top:1px solid var(--line);border-bottom:0"><span class="count-note">${rows.length} of ${letters.length} letters</span></div>`;
+      return;
+    }
     body.innerHTML = `<div class="table-wrap"><table class="register">${outgoing ? outgoingTable(rows) : incomingTable(rows)}</table></div>
       <div class="toolbar" style="border-top:1px solid var(--line);border-bottom:0"><span class="count-note">${rows.length} of ${letters.length} letters</span></div>`;
   };
@@ -525,7 +587,7 @@ function incomingTable(rows) {
       <td><span class="mono">${esc(l.reference)}</span>${sub(esc(fmtDate(l.created_at)))}${sub(esc(RECEIVED_VIA[l.received_via] || ''))}</td>
       <td><span class="title">${esc(l.subject)}</span>${sub(`From ${esc(l.sender)}`)}</td>
       <td><span>${l.letter_date ? esc(fmtDate(l.letter_date)) : '—'}</span>${sub(esc(l.agency_reference || ''), 'sub mono')}${sub(l.signatory ? `Signed: ${esc(l.signatory)}` : '')}</td>
-      <td><span>${esc(l.department_name)}</span>${sub(l.assignee_name ? esc(l.assignee_name) : 'Unassigned')}</td>
+      <td><span>${esc(deptLabel(l))}</span>${sub(l.assignee_name ? esc(l.assignee_name) : 'Unassigned')}</td>
       <td><span>${esc(ACTIONS[l.action_required] || '—')}</span><div class="chips">${dueChip(l)}</div></td>
       <td><div class="chips">${statusPills(l)}</div>${sub(esc(l.status_remarks || ''), 'sub remarks')}</td>
       <td>${l.response_id ? `<a class="mono" href="#/letter/${l.response_id}">${esc(l.response_reference)}</a>${sub(esc(stageLabel({ direction: 'outgoing', status: l.response_status, dispatch_status: l.response_dispatch_status })))}` : '<span class="sub">—</span>'}</td></tr>`).join('')}</tbody>`;
@@ -537,15 +599,18 @@ function outgoingTable(rows) {
       <td><span class="mono">${esc(l.our_reference)}</span>${sub(esc(fmtDate(l.finalized_at || l.created_at)))}</td>
       <td><span class="title">${esc(l.subject)}</span>${sub(`To ${l.addressee ? `${esc(l.addressee)}, ` : ''}${esc(l.sender)}`)}</td>
       <td><span>${esc(l.department_name)}</span>${sub(esc(l.assignee_name || ''))}</td>
-      <td>${l.in_reply_to ? `<a class="mono" href="#/letter/${l.in_reply_to}">${esc(l.in_reply_to_reference)}</a>` : '<span class="sub">New letter</span>'}</td>
+      <td>${l.in_reply_to ? `<a class="mono" href="#/letter/${l.in_reply_to}">${esc(l.in_reply_to_reference)}</a>${sub(l.in_reply_to_direction === 'outgoing' ? 'Follow-up' : 'Reply')}` : '<span class="sub">New letter</span>'}</td>
       <td><div class="chips">${l.matter_status === 'closed' ? matterPill(l) : ''}${stagePill(l)}${dueChip(l)}</div></td>
       <td>${l.dispatch_method ? `<span>${esc(DISPATCH_METHODS[l.dispatch_method] || l.dispatch_method)}</span>${sub(esc(fmtDate(l.dispatched_on)))}` : '<span class="sub">—</span>'}</td>
       <td>${['delivered', 'returned'].includes(l.dispatch_status) ? `<span>${l.dispatch_status === 'delivered' ? 'Delivered' : 'Returned'} ${esc(fmtDate(l.delivered_on))}</span>${sub(esc(l.delivery_note || ''))}` : '<span class="sub">—</span>'}</td></tr>`).join('')}</tbody>`;
 }
 
 function exportRegister(direction, rows) {
-  const common = [['Department', (l) => l.department_name], ['Status', (l) => MATTER[l.matter_status] || 'Open'], ['Remarks', (l) => l.status_remarks], ['Stage', (l) => stageLabel(l)], ['Deadline', (l) => l.due_date]];
-  const columns = direction === 'outgoing' ? [
+  const common = [['Department', deptLabel], ['Status', (l) => MATTER[l.matter_status] || 'Open'], ['Remarks', (l) => l.status_remarks], ['Stage', (l) => stageLabel(l)], ['Deadline', (l) => l.due_date]];
+  const columns = direction === 'all' ? [
+    ['Direction', (l) => (isOutgoing(l) ? 'Outgoing' : 'Incoming')], ['Reference', (l) => l.our_reference || l.reference], ['Date', (l) => (l.created_at || '').slice(0, 10)],
+    ['Subject', (l) => l.subject], ['Institution', (l) => l.sender], ['Handled by', (l) => l.assignee_name], ['In reply to', (l) => l.in_reply_to_reference], ...common,
+  ] : direction === 'outgoing' ? [
     ['Our ref', (l) => l.our_reference], ['Date created', (l) => (l.created_at || '').slice(0, 10)], ['Date approved', (l) => (l.finalized_at || '').slice(0, 10)],
     ['Subject', (l) => l.subject], ['Addressee', (l) => l.addressee], ['Institution', (l) => l.sender], ['Written by', (l) => l.assignee_name],
     ['In reply to', (l) => l.in_reply_to_reference], ['Copied to', (l) => (l.cc_parties || '').replace(/\s*\n\s*/g, '; ')], ...common,
@@ -563,7 +628,7 @@ function exportRegister(direction, rows) {
   const link = document.createElement('a');
   // The byte-order mark makes Excel read the file as UTF-8.
   link.href = URL.createObjectURL(new Blob(['﻿', csv], { type: 'text/csv' }));
-  link.download = `${direction}-register-${todayISO()}.csv`;
+  link.download = `${direction === 'all' ? 'all-letters' : `${direction}-register`}-${todayISO()}.csv`;
   link.click();
   setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 }
@@ -658,7 +723,13 @@ function mountEditor(letter) {
     status('Saving…');
     saving = api(`/letters/${letter.id}/response`, { method: 'PUT', json: { body_html: quill.getSemanticHTML() } })
       .then((saved) => { letter.body_html = saved.body_html; letter.response_text = saved.response_text; status(dirty ? 'Unsaved changes' : `Saved ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`, 'ok'); })
-      .catch((error) => { dirty = true; status('Not saved', 'error'); throw error; });
+      .catch((error) => {
+        dirty = true;
+        status('Not saved', 'error');
+        // Someone else holds the letter now; stop retrying until it is reopened.
+        if (/is editing this letter/.test(error.message)) clearInterval(timer);
+        throw error;
+      });
     return saving;
   };
   quill.on('text-change', (delta, old, source) => { if (source === 'user') { dirty = true; status('Unsaved changes'); } });
@@ -668,11 +739,52 @@ function mountEditor(letter) {
   });
   const warn = (event) => { if (dirty) { event.preventDefault(); event.returnValue = ''; } };
   window.addEventListener('beforeunload', warn);
+  // Keep holding the letter while the editor is open, so no one else edits it at the same time.
+  const hold = setInterval(() => api(`/letters/${letter.id}/editing`, { method: 'POST' }).then((claim) => {
+    if (!claim.mine) {
+      clearInterval(hold);
+      clearInterval(timer);
+      status(`${claim.editing_name} is editing now`, 'error');
+      toast(`${claim.editing_name} is editing this letter now. Reopen it to see their changes.`, 'error');
+    }
+  }).catch(() => {}), 30000);
+  const leave = () => releaseEditing(letter.id, true);
+  window.addEventListener('pagehide', leave);
   return {
     save,
-    // Leaving the page: save what is there and stop the timers.
-    close: () => { clearInterval(timer); window.removeEventListener('beforeunload', warn); if (dirty) save().catch(() => toast('Your last changes could not be saved.', 'error')); },
+    // Leaving the page: save what is there, stop the timers, then let the next person edit.
+    close: () => {
+      clearInterval(timer);
+      clearInterval(hold);
+      window.removeEventListener('beforeunload', warn);
+      window.removeEventListener('pagehide', leave);
+      const saved = dirty ? save().catch(() => toast('Your last changes could not be saved.', 'error')) : Promise.resolve();
+      return saved.then(() => releaseEditing(letter.id));
+    },
   };
+}
+
+function releaseEditing(letterId, leaving = false) {
+  // keepalive lets the request finish while the tab closes.
+  return fetch(`/letters/${letterId}/editing`, { method: 'DELETE', credentials: 'same-origin', keepalive: leaving }).catch(() => {});
+}
+
+// Someone else has the letter open: check now and then, and open the editor here once they finish.
+function waitForEditor(letter) {
+  const poll = setInterval(async () => {
+    try {
+      const claim = await api(`/letters/${letter.id}/editing`, { method: 'POST' });
+      if (claim.mine && location.hash === `#/letter/${letter.id}`) {
+        clearInterval(poll);
+        toast('The letter is free to edit now.');
+        state.editor = null;
+        await renderDetail(letter.id);
+      } else if (claim.mine) {
+        releaseEditing(letter.id);
+      }
+    } catch { /* keep waiting */ }
+  }, 20000);
+  return { save: () => Promise.resolve(), close: () => { clearInterval(poll); } };
 }
 
 /* ---------------- Letter detail ---------------- */
@@ -709,7 +821,10 @@ function describeEvent(event, letter) {
   const map = {
     intake_created: ['inbox', 'wine', `Registered by ${who}`],
     routed_to_department: ['arrow', 'blue', `Routed to ${esc(departmentName(details.department_id))} by ${who}`],
-    assigned: ['user', 'blue', `Assigned${details.assignee_id === letter.assigned_to && letter.assignee_name ? ` to ${esc(letter.assignee_name)}` : ''} by ${who}`],
+    assigned: ['user', 'blue', `Assigned${details.assignee ? ` to ${esc(details.assignee)}` : details.assignee_id === letter.assigned_to && letter.assignee_name ? ` to ${esc(letter.assignee_name)}` : ''}${details.department_id ? ` in ${esc(departmentName(details.department_id))}` : ''} by ${who}`],
+    escalated: ['alert', 'wine', `Passed automatically to ${esc(details.to || '')} after ${esc(details.days)} days waiting ${esc(details.waited || '')}`],
+    thread_linked: ['layers', 'blue', details.reference ? `Marked by ${who} as answering ${esc(details.reference)}` : `Link to an earlier letter removed by ${who}`],
+    follow_up_started: ['send', 'blue', `Follow-up ${esc(details.our_reference || '')} started by ${who}`],
     response_started: ['file', 'blue', `Reply ${esc(details.our_reference || '')} started by ${who}`],
     response_approved: ['check', 'green', `Reply ${esc(details.our_reference || '')} approved by ${who}`],
     outgoing_created: ['send', 'wine', `Letter ${esc(details.our_reference || '')} registered by ${who}${details.assignee_id ? '' : ' · waiting for the department to assign a writer'}`],
@@ -776,14 +891,23 @@ const today = () => todayISO();
 /* Shared by both registers: send a letter to another department, or pick who handles it. */
 function routeBlock(letter) {
   const deptOptions = state.departments.map((d) => `<option value="${d.id}" ${d.id === letter.department_id ? 'selected' : ''}>${esc(d.name)}</option>`).join('');
-  return `<label>Department<select id="a-dept">${deptOptions}</select></label><div class="btn-row"><button class="btn btn-secondary" data-act="route-department">${icon('arrow')}Route to department</button></div>`;
+  const choose = letter.department_id ? '' : '<option value="">Choose a department…</option>';
+  return `<label>Department<select id="a-dept">${choose}${deptOptions}</select></label><div class="btn-row"><button class="btn btn-secondary" data-act="route-department">${icon('arrow')}${letter.department_id ? 'Route to department' : 'Send to the department head'}</button></div>`;
 }
 
 async function assignBlock(letter, { selfLabel } = {}) {
-  const members = (await loadTeamMembers()).filter((m) => m.department_id === letter.department_id);
+  // The MD (and anyone working on every letter) may send a letter not yet picked up to anyone, heads included.
+  const anywhere = isAdmin() && letter.status === 'intake';
+  const members = (await loadTeamMembers()).filter((m) => (anywhere || m.department_id === letter.department_id) && (isAdmin() || m.role !== 'department_head'));
   const self = selfLabel ? `<button class="btn btn-secondary" data-act="assign-self">${icon('edit')}${esc(selfLabel)}</button>` : '';
-  if (!members.length) return `<p>There are no active team members in ${esc(letter.department_name)}. Add one under Users &amp; departments.</p>${self ? `<div class="btn-row">${self}</div>` : ''}`;
-  return `<label>${isOutgoing(letter) ? 'Who will write it' : 'Assign to'}<select id="a-assignee"><option value="">Choose a team member…</option>${members.map((m) => `<option value="${m.id}" ${m.id === letter.assigned_to ? 'selected' : ''}>${esc(m.display_name)}</option>`).join('')}</select></label>
+  if (!members.length) return `<p>There are no active team members in ${esc(deptLabel(letter))}. Add one under Users &amp; departments.</p>${self ? `<div class="btn-row">${self}</div>` : ''}`;
+  const option = (m) => `<option value="${m.id}" ${m.id === letter.assigned_to ? 'selected' : ''}>${esc(m.display_name)}${m.role === 'department_head' ? ' (head)' : ''}</option>`;
+  const groups = anywhere
+    ? state.departments.slice().sort((a, b) => (b.id === letter.department_id) - (a.id === letter.department_id))
+      .map((d) => [d, members.filter((m) => m.department_id === d.id)]).filter(([, list]) => list.length)
+      .map(([d, list]) => `<optgroup label="${esc(d.name)}">${list.map(option).join('')}</optgroup>`).join('')
+    : members.map(option).join('');
+  return `<label>${isOutgoing(letter) ? 'Who will write it' : anywhere ? 'Or assign it straight to a person' : 'Assign to'}<select id="a-assignee"><option value="">Choose ${anywhere ? 'a person' : 'a team member'}…</option>${groups}</select></label>
     <div class="btn-row"><button class="btn btn-primary" data-act="assign">${icon('user')}${letter.assigned_to ? 'Reassign' : 'Assign'}</button>${self}</div>`;
 }
 
@@ -798,8 +922,11 @@ async function incomingPanel(letter, responses) {
 
   if (s === 'intake' && !isHeadOf(letter) && (mayRoute() || mayAssign(letter))) {
     const blocks = [mayRoute() ? routeBlock(letter) : '', mayAssign(letter) ? await assignBlock(letter) : ''].filter(Boolean);
-    const respond = canRespond(letter) ? `<hr class="sep"><div class="btn-row">${respondButton('Respond to it myself')}</div>` : '';
-    return card(mayAssign(letter) ? 'Route or assign' : 'Route this letter', 'Send it to the right department, choose who handles it, or reply to it yourself.', blocks.join('<hr class="sep">') + respond);
+    // A reply takes its reference from a department, so the letter is sent to one first.
+    const respond = canRespond(letter) && letter.department_id ? `<hr class="sep"><div class="btn-row">${respondButton('Respond to it myself')}</div>` : '';
+    return withMD(letter)
+      ? card('Send this letter on', 'Send it to a department, whose head assigns it, or straight to the person who should handle it.', blocks.join('<hr class="sep">'), 'Received for you')
+      : card(mayAssign(letter) ? 'Route or assign' : 'Route this letter', 'Send it to the right department, choose who handles it, or reply to it yourself.', blocks.join('<hr class="sep">') + respond);
   }
   if (isHeadOf(letter) && mayAssign(letter) && ['intake', 'assigned'].includes(s) && !open) {
     return card(s === 'intake' ? 'Assign this letter' : 'Assigned', s === 'intake' ? 'Choose who will prepare the reply.' : `${letter.assignee_name} is to reply. You can reassign it.`,
@@ -815,7 +942,7 @@ async function incomingPanel(letter, responses) {
     // The replies themselves are listed in the "Replies sent" card below.
     return card('Responded', done.length ? `Replied on ${fmtDate(done[done.length - 1].finalized_at)}.` : 'Closed.', canRespond(letter) ? `<div class="btn-row">${respondButton('Send a further letter')}</div>` : '', 'Complete');
   }
-  const waiting = { intake: `Waiting for ${letter.department_name} to assign it.`, assigned: `${letter.assignee_name || 'The assignee'} has not replied yet.`, in_progress: 'A reply is being drafted.' }[s] || '';
+  const waiting = { intake: withMD(letter) ? 'With the MD, who sends it to a department.' : `Waiting for ${letter.department_name} to assign it.`, assigned: `${letter.assignee_name || 'The assignee'} has not replied yet.`, in_progress: 'A reply is being drafted.' }[s] || '';
   return `<section class="card"><div class="card-head"><div><p class="eyebrow">Stage</p><h3>${esc(stageLabel(letter))}</h3><p>${esc(waiting)}</p></div></div></section>`;
 }
 
@@ -936,7 +1063,7 @@ function peopleCard(letter, audit) {
   const others = (letter.collaborators || []).map(collabName);
   return `<section class="card"><div class="card-head"><div><h3>People</h3><p>Who is involved, on our side and theirs.</p></div></div><dl class="facts">
     ${outgoing ? fact('To receive and reply', person(letter.addressee, letter.addressee_title) || '—') : fact('Signed by (sender)', person(letter.signatory, letter.signatory_title) || '—')}
-    ${fact('Department', esc(letter.department_name))}
+    ${fact('Department', esc(deptLabel(letter)))}
     ${fact(outgoing ? 'Started by' : 'Registered by', esc(letter.created_by_name || '—'))}
     ${fact(outgoing ? 'Writer' : 'Assigned to', letter.assignee_name ? esc(letter.assignee_name) : 'Not yet assigned')}
     ${outgoing ? fact('Written and edited by', names(actors('response_saved', 'response_uploaded')) || 'No edits yet') : ''}
@@ -965,6 +1092,7 @@ function holderOf(letter) {
   const head = `${letter.department_name} head`;
   const writer = letter.assignee_name || 'the writer';
   if (!isOutgoing(letter)) {
+    if (withMD(letter)) return 'Managing Director, to send it to a department';
     return { intake: `${head}, to assign it`, assigned: `${writer}, to reply`, in_progress: `${writer}, writing the reply` }[letter.status] || null;
   }
   if (letter.matter_status === 'closed') return null;
@@ -978,7 +1106,7 @@ function holderOf(letter) {
   }[letter.status] || null;
 }
 
-const MILESTONES = new Set(['intake_created', 'outgoing_created', 'routed_to_department', 'assigned', 'response_started', 'submitted_for_review',
+const MILESTONES = new Set(['intake_created', 'outgoing_created', 'routed_to_department', 'assigned', 'escalated', 'response_started', 'submitted_for_review',
   'department_approved', 'changes_requested', 'routed_to_md', 'md_override', 'approved_and_finalized', 'response_approved', 'dispatched', 'delivery_recorded']);
 
 function journeyCard(letter, audit) {
@@ -1138,15 +1266,40 @@ function registerCard(letter) {
   </dl></section>`;
 }
 
-function linksCard(letter, responses, original) {
-  if (isOutgoing(letter)) {
-    if (!original) return '';
-    return `<section class="card"><div class="card-head"><div><h3>In reply to</h3><p>The received letter this answers.</p></div></div><div class="action-body">
-      <a class="reply-link" href="#/letter/${original.id}">${icon('inbox')}<span><strong class="mono">${esc(original.reference)}</strong><small>${esc(original.subject)} · from ${esc(original.sender)}</small></span>${icon('arrow')}</a></div></section>`;
+/* ---------------- Thread ---------------- */
+// Answering a letter received is a reply; writing again after our own approved letter is a follow-up.
+const answerable = (l) => (isOutgoing(l) ? l.status === 'finalized' : Boolean(l.department_id));
+const relation = (l, parent) => (!parent ? '' : isOutgoing(l) === isOutgoing(parent) ? 'Follows up' : 'Answers');
+
+// Every letter in the correspondence, in and out, oldest first. Any of them can be answered from here.
+function threadCard(letter, thread, mayLink, candidates) {
+  const byId = Object.fromEntries(thread.map((t) => [t.id, t]));
+  const ref = (t) => t.our_reference || t.reference;
+  const items = thread.map((t) => {
+    const parent = byId[t.in_reply_to];
+    const when = isOutgoing(t) ? (t.dispatched_on ? `sent ${fmtDate(t.dispatched_on)}` : `started ${fmtDate(t.created_at)}`) : `received ${fmtDate(t.received_date || t.created_at)}`;
+    const action = canRespond() && answerable(t)
+      ? `<button class="btn btn-secondary btn-sm" data-act="respond-to" data-id="${t.id}">${icon(isOutgoing(t) ? 'send' : 'file')}${isOutgoing(t) ? 'Follow up' : 'Respond'}</button>` : '';
+    return `<li class="thread-item ${isOutgoing(t) ? 'out' : 'in'} ${t.id === letter.id ? 'current' : ''}">${icon(isOutgoing(t) ? 'send' : 'inbox')}
+      <div class="thread-main"><a href="#/letter/${t.id}"><strong class="mono">${isOutgoing(t) ? 'OUT' : 'IN'} · ${esc(ref(t))}</strong></a>
+        <span>${esc(t.subject)}</span>
+        <small>${isOutgoing(t) ? 'To' : 'From'} ${esc(t.sender)} · ${esc(when)}${parent ? ` · ${relation(t, parent)} ${esc(ref(parent))}` : ''}${t.id === letter.id ? ' · this letter' : ''}</small></div>
+      <div class="thread-side">${isClosed(t) ? matterPill(t) : stagePill(t)}${action}</div></li>`;
+  }).join('');
+  let link = '';
+  if (mayLink) {
+    // Letters from the same institution first, the most recent at the top.
+    const options = candidates.filter((c) => c.id !== letter.id)
+      .sort((a, b) => (b.sender === letter.sender) - (a.sender === letter.sender) || String(b.created_at).localeCompare(String(a.created_at)))
+      .slice(0, 300)
+      .map((c) => `<option value="${c.id}" ${c.id === letter.in_reply_to ? 'selected' : ''}>${isOutgoing(c) ? 'OUT' : 'IN'} · ${esc(ref(c))} · ${esc(c.subject)} (${esc(c.sender)})</option>`).join('');
+    link = `<details class="thread-link" ${letter.in_reply_to || thread.length > 1 ? '' : 'open'}><summary>${icon('layers')}${letter.in_reply_to ? 'Change which letter this answers' : 'Which letter does this answer?'}</summary>
+      <label>This letter answers or follows up<select id="t-earlier"><option value="">Nothing: it starts a new correspondence</option>${options}</select></label>
+      <div class="btn-row"><button class="btn btn-secondary" data-act="thread-link">${icon('check')}Save</button></div></details>`;
   }
-  if (!responses.length) return '';
-  return `<section class="card"><div class="card-head"><div><h3>Replies sent</h3><p>Outgoing letters answering this one.</p></div></div><div class="action-body">
-    ${responses.map((r) => `<a class="reply-link" href="#/letter/${r.id}">${icon('send')}<span><strong class="mono">${esc(r.our_reference)}</strong><small>${esc(stageLabel({ ...r, direction: 'outgoing' }))}${r.dispatched_on ? ` · sent ${esc(fmtDate(r.dispatched_on))}` : ''}</small></span>${icon('arrow')}</a>`).join('')}</div></section>`;
+  if (thread.length < 2 && !link && !(canRespond() && isOutgoing(letter) && letter.status === 'finalized')) return '';
+  return `<section class="card" id="thread"><div class="card-head"><div><h3>Thread</h3><p>Every letter in this correspondence, in and out. Respond to any of them, or follow up a letter we sent.</p></div>${thread.length > 1 ? `<span class="count-note">${thread.length}</span>` : ''}</div>
+    <div class="action-body"><ul class="thread">${items}</ul>${link}</div></section>`;
 }
 
 async function renderDetail(id) {
@@ -1155,7 +1308,7 @@ async function renderDetail(id) {
   const view = $('#view');
   view.innerHTML = `<div class="skeleton" style="height:120px;margin-bottom:20px"></div><div class="grid-2"><div class="skeleton" style="height:560px"></div><div class="skeleton" style="height:360px"></div></div>`;
   const token = state.route;
-  const { letter, audit, responses, in_reply_to_letter: original, enclosures = [], comments = [], signatory = null, collaborators = [], may_manage_collaborators: mayManage = false } = await api(`/letters/${id}`);
+  const { letter, audit, responses, enclosures = [], comments = [], signatory = null, collaborators = [], may_manage_collaborators: mayManage = false, thread = [], may_link: mayLink = false } = await api(`/letters/${id}`);
   letter.collaborators = collaborators;
   letter.may_manage_collaborators = mayManage;
   letter.signer = signatory;
@@ -1163,15 +1316,24 @@ async function renderDetail(id) {
   const outgoing = isOutgoing(letter);
   const panel = outgoing ? await outgoingPanel(letter, audit) : await incomingPanel(letter, responses);
   const collaboration = await collaborationCard(letter);
+  const candidates = mayLink ? await loadLetters().catch(() => []) : [];
   if (stale(token)) return;
   setPage(outgoing ? 'Outgoing letter' : 'Received letter', letter.our_reference || letter.reference, registerOf(letter));
   const fact = (label, value) => `<dt>${esc(label)}</dt><dd>${value}</dd>`;
-  const editable = canEdit(letter);
+  // Only one person drafts at a time: whoever opens the editor first holds it while it stays open.
+  let editable = canEdit(letter);
+  let editingBy = null;
+  if (editable) {
+    await state.closing;
+    const claim = await api(`/letters/${letter.id}/editing`, { method: 'POST' }).catch(() => ({ mine: false }));
+    if (!claim.mine) { editable = false; editingBy = claim.editing_name || 'Someone else'; }
+  }
   const picker = editable ? await signatoryPicker(letter).catch(() => '') : '';
-  if (stale(token)) return;
+  if (stale(token)) { if (editable) releaseEditing(letter.id); return; }
   const viewer = outgoing
-    ? (editable ? editorCard(letter, picker) : `<section class="card editor-card"><div class="card-head"><div><h3>The letter</h3><p>${esc(whoCanEdit(letter))}</p></div>
+    ? (editable ? editorCard(letter, picker) : `<section class="card editor-card"><div class="card-head"><div><h3>The letter</h3><p>${esc(editingBy ? 'Read only while someone else is editing it.' : whoCanEdit(letter))}</p></div>
         ${letter.status === 'finalized' ? `<div class="btn-row"><a class="btn btn-secondary btn-sm" href="/letters/${letter.id}/pdf" style="text-decoration:none">${icon('download')}PDF</a></div>` : ''}</div>
+        ${editingBy ? `<div class="editing-banner" role="status">${icon('lock', 'inline')}<span>${esc(editingBy)} is editing this letter now. Only one person edits at a time; it opens for you here when they finish.</span></div>` : ''}
         ${letter.status === 'finalized' ? '<div id="sig-status" class="sig-status"></div>' : ''}
         <div class="editor-desk">${letterPaper(letter)}</div></section>`)
     : `<section class="card viewer"><div class="card-head"><div><h3>Original document</h3><p>${esc(letter.source_file)}</p></div>
@@ -1181,7 +1343,7 @@ async function renderDetail(id) {
     <a class="back" href="#/${registerOf(letter)}">${icon('back')}Back to the ${outgoing ? 'outgoing' : 'incoming'} register</a>
     <div class="detail-head"><div style="min-width:0"><span class="row-sub">${outgoing ? `${icon('send', 'inline')} Outgoing · To ${letter.addressee ? `${esc(letter.addressee)}, ` : ''}${esc(letter.sender)}` : `${icon('inbox', 'inline')} Received · From ${esc(letter.sender)}`}</span><h2>${esc(letter.subject)}</h2>
       <p class="ref-line">${outgoing ? `Our Ref <b class="mono">${esc(letter.our_reference || '')}</b>` : `Register <b class="mono">${esc(letter.reference)}</b>`}${letter.agency_reference ? ` · ${outgoing ? 'Your Ref' : 'Their Ref'} <b class="mono">${esc(letter.agency_reference)}</b>` : ''}</p>
-      <div class="chips">${statusPills(letter)}${priorityChip(letter.priority)}${dueChip(letter)}${confChip(letter)}${outgoing ? '' : `<span class="chip">${esc(letter.category || 'General correspondence')}</span>`}</div></div></div>
+      <div class="chips">${statusLinks(letter)}${priorityChip(letter.priority)}${dueChip(letter)}${confChip(letter)}${outgoing ? '' : `<span class="chip">${esc(letter.category || 'General correspondence')}</span>`}</div></div></div>
     ${stepper(letter)}
     <div class="grid-2">
       ${viewer}
@@ -1189,7 +1351,7 @@ async function renderDetail(id) {
         ${panel}
         ${journeyCard(letter, audit)}
         ${collaboration}
-        ${linksCard(letter, responses, original)}
+        ${threadCard(letter, thread, mayLink, candidates)}
         ${enclosuresCard(letter, enclosures)}
         ${trackingCard(letter)}
         ${registerCard(letter)}
@@ -1206,6 +1368,7 @@ async function renderDetail(id) {
       </div>
     </div>`;
   if (editable) state.editor = mountEditor(letter);
+  else if (editingBy) state.editor = waitForEditor(letter);
   if (outgoing && letter.status === 'finalized') loadSignatureStatus(letter);
   bindActions(letter);
   if (!outgoing) loadPreview(letter.id);
@@ -1335,7 +1498,24 @@ function bindActions(letter) {
         } catch (error) { toast(error.message, 'error'); }
       });
     }
-    if (act === 'route-department') return run(button, 'POST', `/letters/${letter.id}/route`, { department_id: $('#a-dept').value }, `Routed to ${departmentName($('#a-dept').value)}.`);
+    if (act === 'route-department') {
+      if (!$('#a-dept').value) { toast('Choose the department first.', 'error'); return; }
+      return run(button, 'POST', `/letters/${letter.id}/route`, { department_id: $('#a-dept').value }, `Sent to ${departmentName($('#a-dept').value)}. Its head has been told.`);
+    }
+    if (act === 'respond-to') {
+      return busy(button, async () => {
+        try {
+          const reply = await api(`/letters/${button.dataset.id}/respond`, { method: 'POST', json: {} });
+          toast(`${reply.our_reference} started. Write it in the editor.`);
+          await reload(reply.id);
+        } catch (error) { toast(error.message, 'error'); }
+      });
+    }
+    if (act === 'thread-link') {
+      const chosen = $('#t-earlier');
+      const label = chosen.value ? `Linked to ${chosen.selectedOptions[0].textContent.split(' · ')[1]}.` : 'Link removed.';
+      return run(button, 'POST', `/letters/${letter.id}/link`, { in_reply_to: chosen.value || null }, label);
+    }
     if (act === 'assign') {
       if (!$('#a-assignee').value) { toast('Choose a team member first.', 'error'); return; }
       const name = $('#a-assignee').selectedOptions[0].textContent;
@@ -1453,7 +1633,9 @@ function renderIntake() {
         <label>Category<select name="category">${CATEGORIES.map((c) => `<option>${esc(c)}</option>`).join('')}</select></label>
         <label class="wide"><span>Copied parties named in the letter <span class="hint">(one per line)</span></span><textarea name="cc_parties" rows="3" placeholder="e.g. Ghana Revenue Authority"></textarea></label>
         <p class="form-section-title">Routing &amp; handling</p>
-        <label>Department *<select name="department_id" required><option value="">Choose department…</option>${deptOptions}</select></label>
+        ${can('route_letters')
+          ? `<label><span>Department <span class="hint">(optional)</span></span><select name="department_id"><option value="">Leave it with the MD to send on</option>${deptOptions}</select></label>`
+          : `<label>Goes to<input value="The MD, who sends it to a department" disabled></label>`}
         <label>Action required<select name="action_required">${Object.entries(ACTIONS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></label>
         <label><span>Deadline <span class="hint">(optional)</span></span><input name="due_date" type="date" min="${todayISO()}"></label>
         <label>Priority<select name="priority"><option value="normal">Normal</option><option value="high">High</option><option value="urgent">Urgent</option><option value="low">Low</option></select></label>
@@ -1468,7 +1650,7 @@ function renderIntake() {
     <aside class="card"><div class="card-head"><h3>How intake works</h3></div><div class="tips">
       <div class="tip"><b>1</b><span>Scan or photograph the letter and upload it. PDF gives the best results; files up to 25 MB are accepted.</span></div>
       <div class="tip"><b>2</b><span>Type the details exactly as they appear on the letter. They are locked once you press Register.</span></div>
-      <div class="tip"><b>3</b><span>Pick the department that should respond. Its head is notified and assigns someone.</span></div>
+      <div class="tip"><b>3</b><span>The letter goes to the MD, who sends it to the right department (its head assigns someone) or straight to a person. The department head links it to any earlier letter it answers.</span></div>
       <div class="tip"><b>4</b><span>The scan and all details are saved in a folder for this letter. The reply gets its own reference, e.g. SIGL/MOF/AC/0001.</span></div>
     </div></aside></div>`;
   api('/people').then((people) => { $('#intake-collaborators').innerHTML = pickerHtml(people); }).catch(() => { $('#intake-collaborators').innerHTML = ''; });
@@ -1500,7 +1682,7 @@ function renderIntake() {
     event.preventDefault();
     const form = event.target;
     if (!file) { toast('Add the scanned letter first.', 'error'); return; }
-    const missing = ['sender', 'subject', 'signatory', 'received_date', 'department_id'].find((name) => !form.elements[name].value.trim());
+    const missing = ['sender', 'subject', 'signatory', 'received_date'].find((name) => !form.elements[name].value.trim());
     if (missing) { form.elements[missing].focus(); toast('Fill in the required fields marked *.', 'error'); return; }
     const fields = Object.fromEntries(new FormData(form));
     const button = $('#intake-submit');
@@ -1521,7 +1703,7 @@ function renderIntake() {
         }
         progress(1, 'Done');
         state.letters = null;
-        toast(`${letter.reference} registered and sent to ${departmentName(letter.department_id)}.`);
+        toast(`${letter.reference} registered and sent to ${letter.department_id ? departmentName(letter.department_id) : 'the MD'}.`);
         const added = await addPicked(letter.id, $('#intake-collaborators')).catch((error) => { toast(`Letter registered, but collaborators were not added: ${error.message}`, 'error'); return 0; });
         if (added) toast(`${added} collaborator${added > 1 ? 's' : ''} added and notified.`);
         location.hash = `#/letter/${letter.id}`;
@@ -1562,15 +1744,20 @@ async function renderCompose(params) {
   const role = state.user.role;
   // The front desk, MD and MD PA choose the sending department; department staff send from their own.
   const choosesDept = ['front_desk', 'md', 'md_pa'].includes(role);
-  const answerable = letters.filter((l) => !isOutgoing(l) && l.status !== 'finalized' && canRespond(l))
-    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  // A reply to a letter received, or a follow-up to one of our approved letters.
+  const byNewest = (a, b) => String(b.created_at).localeCompare(String(a.created_at));
+  const toReply = letters.filter((l) => !isOutgoing(l) && l.status !== 'finalized' && l.department_id && canRespond(l)).sort(byNewest);
+  const toFollow = letters.filter((l) => isOutgoing(l) && l.status === 'finalized' && canRespond(l)).sort(byNewest);
+  const answerable = [...toReply, ...toFollow];
   const deptOptions = state.departments.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
   $('#view').innerHTML = `<div class="grid-2">
     <form class="card" id="compose-form" novalidate>
       <div class="form-grid">
         <p class="form-section-title">The letter</p>
         <label class="wide">Subject *<input name="subject" required placeholder="What is the letter about?" autocomplete="off"></label>
-        ${answerable.length ? `<label class="wide">In reply to <span class="hint">(optional)</span><select name="in_reply_to"><option value="">Nothing: a new letter</option>${answerable.map((l) => `<option value="${l.id}">${esc(l.reference)} · ${esc(l.subject)} (${esc(l.sender)})</option>`).join('')}</select></label>` : ''}
+        ${answerable.length ? `<label class="wide">In reply to or following up <span class="hint">(optional)</span><select name="in_reply_to"><option value="">Nothing: a new letter</option>
+          ${toReply.length ? `<optgroup label="Reply to a letter received">${toReply.map((l) => `<option value="${l.id}">${esc(l.reference)} · ${esc(l.subject)} (${esc(l.sender)})</option>`).join('')}</optgroup>` : ''}
+          ${toFollow.length ? `<optgroup label="Follow up a letter we sent">${toFollow.map((l) => `<option value="${l.id}">${esc(l.our_reference)} · ${esc(l.subject)} (${esc(l.sender)})</option>`).join('')}</optgroup>` : ''}</select></label>` : ''}
         <p class="form-section-title">Who it is going to</p>
         <label>Institution / organisation *<input name="recipient" required placeholder="e.g. Ministry of Finance" autocomplete="off"></label>
         <label>Addressee *<input name="addressee" required placeholder="Who should receive it and reply, e.g. Mr K. Mensah" autocomplete="off"></label>
@@ -1608,7 +1795,7 @@ async function renderCompose(params) {
       slot.innerHTML = 'Writer<select name="writer"><option value="department">The department head assigns one</option><option value="self">Me</option></select>';
       return;
     }
-    const team = members.filter((m) => m.department_id === deptId());
+    const team = members.filter((m) => m.department_id === deptId() && m.role !== 'department_head');
     slot.innerHTML = `Writer<select name="writer">
       <option value="department">${role === 'department_head' ? 'Decide later' : 'The department head assigns one'}</option>
       <option value="self">Me</option>
@@ -1624,8 +1811,9 @@ async function renderCompose(params) {
     if (!original) return;
     form.elements.recipient.value = original.sender;
     form.elements.subject.value = original.subject;
-    form.elements.addressee.value = original.signatory || '';
-    form.elements.addressee_title.value = original.signatory_title || '';
+    // A follow-up goes to the same person as our earlier letter; a reply to whoever signed theirs.
+    form.elements.addressee.value = (isOutgoing(original) ? original.addressee : original.signatory) || '';
+    form.elements.addressee_title.value = (isOutgoing(original) ? original.addressee_title : original.signatory_title) || '';
     form.elements.agency_reference.value = original.agency_reference || '';
     if (choosesDept) { form.elements.department_id.value = original.department_id; drawWriter(); }
   };

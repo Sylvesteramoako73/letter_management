@@ -169,6 +169,8 @@ def initialize(connection) -> None:
         "signatory_id": "INTEGER REFERENCES users(id)",
         "signatory_title": "TEXT",
         "addressee_title": "TEXT",
+        "editing_by": "INTEGER REFERENCES users(id)",
+        "editing_at": "TEXT",
     }
     for name, definition in migrations.items():
         if name not in columns:
@@ -183,7 +185,7 @@ def initialize(connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_letters_our_reference ON letters(our_reference)"
     )
     connection.execute("CREATE INDEX IF NOT EXISTS idx_letters_in_reply_to ON letters(in_reply_to)")
-    _allow_department_review(connection)
+    _rebuild_letters(connection)
     for table, added in {
         "users": {"email": "TEXT", "signature": "BLOB", "permissions": "TEXT", "deleted_at": "TEXT", "microsoft_oid": "TEXT"},
         "notifications": {"emailed_at": "TEXT"},
@@ -207,14 +209,21 @@ def initialize(connection) -> None:
     connection.commit()
 
 
-def _allow_department_review(connection) -> None:
-    """Older SQLite files reject the 'dept_review' stage; SQLite can only change a CHECK by rebuilding the table."""
+def _rebuild_letters(connection) -> None:
+    """Bring an older SQLite letters table up to date where ALTER TABLE cannot.
+
+    Older files reject the 'dept_review' stage, and require a department on every letter (a newly
+    received letter now waits for the MD without one). SQLite can only change these by rebuilding the table.
+    """
     table_sql = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'letters'"
     ).fetchone()["sql"]
-    if "dept_review" in table_sql:
+    rebuilt = table_sql
+    if "dept_review" not in rebuilt:
+        rebuilt = rebuilt.replace("'submitted_for_review',", "'dept_review', 'submitted_for_review',", 1)
+    rebuilt = re.sub(r"department_id INTEGER NOT NULL", "department_id INTEGER", rebuilt, count=1)
+    if rebuilt == table_sql:
         return
-    rebuilt = table_sql.replace("'submitted_for_review',", "'dept_review', 'submitted_for_review',", 1)
     rebuilt = re.sub(r"^CREATE TABLE \"?letters\"?", "CREATE TABLE letters_rebuild", rebuilt)
     connection.commit()
     connection.execute("PRAGMA foreign_keys = OFF")

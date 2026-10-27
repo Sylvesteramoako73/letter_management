@@ -308,15 +308,15 @@ def create_app(test_config=None):
     @authenticated
     def intake(user):
         payload = request.get_json(silent=True) or {}
-        required = ("sender", "subject", "received_date", "department_id", "source_file", "content")
+        required = ("sender", "subject", "received_date", "source_file", "content")
         if any(not payload.get(field) for field in required):
-            return jsonify(error="sender, subject, received_date, department_id, source_file and content are required"), 400
+            return jsonify(error="sender, subject, received_date, source_file and content are required"), 400
         letter = create_letter(
             user,
             payload["sender"],
             payload["subject"],
             payload["received_date"],
-            payload["department_id"],
+            payload.get("department_id"),
             payload["source_file"],
             payload["content"].encode("utf-8"),
             {field: payload.get(field) for field in LETTER_DETAIL_FIELDS},
@@ -329,20 +329,16 @@ def create_app(test_config=None):
         uploaded = request.files.get("document")
         if uploaded is None or not uploaded.filename:
             return jsonify(error="A scanned document is required"), 400
-        fields = ("sender", "subject", "received_date", "department_id")
+        fields = ("sender", "subject", "received_date")
         if any(not request.form.get(field) for field in fields):
-            return jsonify(error="sender, subject, received_date and department_id are required"), 400
-        try:
-            department_id = int(request.form["department_id"])
-        except ValueError:
-            return jsonify(error="department_id must be an integer"), 400
+            return jsonify(error="sender, subject and received_date are required"), 400
         content = uploaded.read()
         letter = create_letter(
             user,
             request.form["sender"],
             request.form["subject"],
             request.form["received_date"],
-            department_id,
+            request.form.get("department_id"),
             uploaded.filename,
             content,
             {field: request.form.get(field) for field in LETTER_DETAIL_FIELDS},
@@ -374,20 +370,16 @@ def create_app(test_config=None):
         path = str(payload.get("storage_path", ""))
         if not storage.enabled() or not path.startswith(f"incoming/{user['id']}/"):
             raise BadRequest("Upload the document before registering the letter")
-        fields = ("sender", "subject", "received_date", "department_id")
+        fields = ("sender", "subject", "received_date")
         if any(not payload.get(field) for field in fields):
-            return jsonify(error="sender, subject, received_date and department_id are required"), 400
-        try:
-            department_id = int(payload["department_id"])
-        except (TypeError, ValueError):
-            return jsonify(error="department_id must be an integer"), 400
+            return jsonify(error="sender, subject and received_date are required"), 400
         content = storage.download(path)
         letter = create_letter(
             user,
             payload["sender"],
             payload["subject"],
             payload["received_date"],
-            department_id,
+            payload.get("department_id"),
             Path(path).name,
             content,
             {field: payload.get(field) for field in LETTER_DETAIL_FIELDS},
@@ -458,23 +450,23 @@ def create_app(test_config=None):
                        l.due_date, l.notes, l.created_at, l.updated_at,
                        l.direction, l.letter_date, l.signatory, l.cc_parties, l.our_reference,
                        l.matter_status, l.status_remarks, l.received_via, l.action_required,
-                       l.addressee, l.in_reply_to, l.dispatch_status, l.dispatch_method,
+                       l.addressee, l.addressee_title, l.signatory_title, l.in_reply_to, l.dispatch_status, l.dispatch_method,
                        l.dispatched_on, l.delivered_on, l.delivery_note,
                        d.name AS department_name,
                        a.display_name AS assignee_name,
                        c.display_name AS created_by_name,
-                       p.reference AS in_reply_to_reference,
+                       p.reference AS in_reply_to_reference, p.direction AS in_reply_to_direction,
                        r.id AS response_id, r.our_reference AS response_reference,
                        r.status AS response_status, r.dispatch_status AS response_dispatch_status,
                        EXISTS (SELECT 1 FROM letter_collaborators k WHERE k.letter_id = l.id
                                AND (k.user_id = ? OR k.department_id = ?)) AS shared_with_me,
                        (SELECT COUNT(*) FROM letter_collaborators k WHERE k.letter_id = l.id) AS collaborator_count
                 FROM letters l
-                JOIN departments d ON d.id = l.department_id
+                LEFT JOIN departments d ON d.id = l.department_id
                 LEFT JOIN users a ON a.id = l.assigned_to
                 LEFT JOIN users c ON c.id = l.created_by
                 LEFT JOIN letters p ON p.id = l.in_reply_to
-                LEFT JOIN letters r ON r.id = (SELECT MAX(x.id) FROM letters x WHERE x.in_reply_to = l.id)
+                LEFT JOIN letters r ON r.id = (SELECT MAX(x.id) FROM letters x WHERE x.in_reply_to = l.id AND x.direction = 'outgoing')
                 {where}
                 ORDER BY l.created_at DESC, l.id DESC
                 """,
@@ -501,7 +493,7 @@ def create_app(test_config=None):
                 """
                 SELECT d.name AS department_name, a.display_name AS assignee_name, c.display_name AS created_by_name
                 FROM letters l
-                JOIN departments d ON d.id = l.department_id
+                LEFT JOIN departments d ON d.id = l.department_id
                 LEFT JOIN users a ON a.id = l.assigned_to
                 LEFT JOIN users c ON c.id = l.created_by
                 WHERE l.id = ?
@@ -518,7 +510,8 @@ def create_app(test_config=None):
                        CASE WHEN delivery_proof IS NULL THEN 0 ELSE 1 END AS has_proof
                 FROM letters
             """
-            responses = connection.execute(f"{linked} WHERE in_reply_to = ? ORDER BY id", (letter_id,)).fetchall()
+            # Our replies and follow-ups; letters received in answer show in the thread.
+            responses = connection.execute(f"{linked} WHERE in_reply_to = ? AND direction = 'outgoing' ORDER BY id", (letter_id,)).fetchall()
             original = (
                 connection.execute(f"{linked} WHERE id = ?", (letter["in_reply_to"],)).fetchone()
                 if letter["in_reply_to"]
@@ -533,6 +526,7 @@ def create_app(test_config=None):
             comments = collaboration.list_comments(connection, letter_id)
             collaborators = collaboration.list_collaborators(connection, letter_id)
             signer = workflow.signatory(connection, letter) if letter["direction"] == "outgoing" else None
+            thread = workflow.thread(connection, letter, user)
         return jsonify(
             letter={
                 **public_letter(letter),
@@ -547,6 +541,8 @@ def create_app(test_config=None):
             comments=comments,
             collaborators=collaborators,
             may_manage_collaborators=collaboration.may_manage_collaborators(user, letter),
+            thread=thread,
+            may_link=workflow.may_link(user, letter),
             signatory={key: signer[key] for key in ("id", "name", "title")} | {"has_signature": bool(signer["signature"])} if signer else None,
         )
 
@@ -752,6 +748,23 @@ def create_app(test_config=None):
     def respond(user, letter_id):
         return jsonify(public_letter(start_response(user, letter_id)))
 
+    @app.post("/letters/<int:letter_id>/link")
+    @authenticated
+    def link_letter(user, letter_id):
+        payload = request.get_json(silent=True) or {}
+        return jsonify(public_letter(workflow.link_to_earlier(user, letter_id, payload.get("in_reply_to"))))
+
+    @app.post("/letters/<int:letter_id>/editing")
+    @authenticated
+    def open_editor(user, letter_id):
+        return jsonify(workflow.open_editor(user, letter_id))
+
+    @app.delete("/letters/<int:letter_id>/editing")
+    @authenticated
+    def close_editor(user, letter_id):
+        workflow.close_editor(user, letter_id)
+        return jsonify(ok=True)
+
     @app.get("/letters/<int:letter_id>/response-docx")
     @authenticated
     def response_docx(user, letter_id):
@@ -819,7 +832,7 @@ def create_app(test_config=None):
                 """
                 SELECT d.name AS department_name, a.display_name AS assignee_name, c.display_name AS created_by_name
                 FROM letters l
-                JOIN departments d ON d.id = l.department_id
+                LEFT JOIN departments d ON d.id = l.department_id
                 LEFT JOIN users a ON a.id = l.assigned_to
                 LEFT JOIN users c ON c.id = l.created_by
                 WHERE l.id = ?
@@ -1035,7 +1048,7 @@ def create_app(test_config=None):
             if not permissions.can(user, "all_letters"):
                 rows = connection.execute(
                     """
-                    SELECT id, display_name, department_id
+                    SELECT id, display_name, department_id, role
                     FROM users
                     WHERE role = 'team_member' AND active = 1 AND department_id = ?
                     ORDER BY display_name
@@ -1043,11 +1056,12 @@ def create_app(test_config=None):
                     (user["department_id"],),
                 ).fetchall()
             else:
+                # The MD can also send a letter straight to a department head.
                 rows = connection.execute(
                     """
-                    SELECT id, display_name, department_id
+                    SELECT id, display_name, department_id, role
                     FROM users
-                    WHERE role = 'team_member' AND active = 1
+                    WHERE role IN ('team_member', 'department_head') AND active = 1 AND department_id IS NOT NULL
                     ORDER BY display_name
                     """
                 ).fetchall()

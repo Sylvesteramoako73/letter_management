@@ -13,6 +13,7 @@ from pathlib import Path
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
+from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
 COMPANY = "SWAMI INDIA GHANA LIMITED"
@@ -27,6 +28,7 @@ FOOTER_PNG = LETTERHEAD_DIR / "footer.png"
 REFERENCE_AREA = (300, 133, 554, 163)
 BODY_AREA = (60, 166, 550, 795)
 PLACEHOLDER = "[Write the body of the letter here.]"
+LETTER_FONT = "Times New Roman"
 _MINOR_WORDS = {"and", "of", "the", "&", "for"}
 
 
@@ -244,8 +246,10 @@ def _letterhead_document(our_reference: str, their_reference: str | None = None)
     section.header_distance, section.top_margin = Cm(0), Cm(6.0)
     section.footer_distance, section.bottom_margin = Cm(0.2), Cm(2.4)
     style = document.styles["Normal"]
-    style.font.name = "Calibri"
-    style.font.size = Pt(11)
+    # Every letter is set in Times New Roman.
+    style.font.name = LETTER_FONT
+    style.element.rPr.rFonts.set(qn("w:eastAsia"), LETTER_FONT)
+    style.font.size = Pt(12)
     style.paragraph_format.space_after = Pt(0)
 
     header = section.header
@@ -264,7 +268,7 @@ def _letterhead_document(our_reference: str, their_reference: str | None = None)
 
 
 _ALIGN = {"ql-align-center": WD_ALIGN_PARAGRAPH.CENTER, "ql-align-right": WD_ALIGN_PARAGRAPH.RIGHT, "ql-align-justify": WD_ALIGN_PARAGRAPH.JUSTIFY}
-_SIZE = {"ql-size-small": Pt(9), "ql-size-large": Pt(14), "ql-size-huge": Pt(20)}
+_SIZE = {"ql-size-small": Pt(10), "ql-size-large": Pt(15), "ql-size-huge": Pt(20)}
 _HEADING_SIZE = {"h1": Pt(16), "h2": Pt(14), "h3": Pt(12)}
 
 

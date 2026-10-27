@@ -11,7 +11,7 @@ import json
 CAPABILITIES = {
     "register_incoming": ("Register incoming letters", "Record letters received, with their scans."),
     "create_outgoing": ("Create outgoing letters", "Start letters to be sent."),
-    "route_letters": ("Route letters to another department", "Send a new letter to a different department."),
+    "route_letters": ("Send letters to departments", "Send a newly received letter on to a department, or to a person directly."),
     "assign_letters": ("Assign letters to staff", "Choose who handles a letter in their department."),
     "all_letters": ("Work on letters in every department", "See every letter, update status, respond and assign anywhere."),
     "edit_register_details": ("Correct locked letter details", "Fix details typed when a letter was registered."),
@@ -21,14 +21,15 @@ CAPABILITIES = {
     "manage_users": ("Manage users and departments", "Add users, reset passwords, add departments."),
 }
 
+# The front desk hands every received letter to the MD, who sends it to a department or a person.
 ROLE_DEFAULTS = {
-    "front_desk": {"register_incoming", "create_outgoing", "route_letters", "dispatch_letters"},
+    "front_desk": {"register_incoming", "create_outgoing", "dispatch_letters"},
     "department_head": {"create_outgoing", "assign_letters", "sign_letters"},
     "team_member": {"create_outgoing"},
     "md_pa": {"create_outgoing", "route_letters", "assign_letters", "all_letters", "edit_register_details",
               "dispatch_letters", "view_reports", "manage_users"},
-    "md": {"create_outgoing", "all_letters", "edit_register_details", "dispatch_letters", "sign_letters",
-           "view_reports", "manage_users"},
+    "md": {"create_outgoing", "route_letters", "assign_letters", "all_letters", "edit_register_details", "dispatch_letters",
+           "sign_letters", "view_reports", "manage_users"},
 }
 
 # The MD always keeps these, so the company cannot be locked out of its own system.
